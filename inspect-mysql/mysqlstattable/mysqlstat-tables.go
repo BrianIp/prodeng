@@ -15,9 +15,8 @@ import (
 )
 
 // Structs:
-// MysqlStats - main struct that contains connection to database, metric context, and map to database stats struct
-
-type MysqlStats struct {
+// MysqlStatTables - main struct that contains connection to database, metric context, and map to database stats struct
+type MysqlStatTables struct {
 	DBs map[string]*DBStats
 	m   *metrics.MetricContext
 	db  *mysqltools.MysqlDB
@@ -45,8 +44,8 @@ type MysqlStatPerDB struct {
 
 //initializes mysqlstat
 // starts off collect
-func New(m *metrics.MetricContext, Step time.Duration, user, password, config string) (*MysqlStats, error) {
-	s := new(MysqlStats)
+func New(m *metrics.MetricContext, Step time.Duration, user, password, config string) (*MysqlStatTables, error) {
+	s := new(MysqlStatTables)
 	s.m = m
 	// connect to database
 	var err error
@@ -84,7 +83,7 @@ func newMysqlStatPerTable(m *metrics.MetricContext, dbname, tblname string) *Mys
 }
 
 //collects metrics
-func (s *MysqlStats) Collect() {
+func (s *MysqlStatTables) Collect() {
 	collections := []error{
 		s.getDBSizes(),
 		s.getTableSizes(),
@@ -98,7 +97,7 @@ func (s *MysqlStats) Collect() {
 }
 
 //instantiate database metrics struct
-func (s *MysqlStats) initializeDB(dbname string) *DBStats {
+func (s *MysqlStatTables) initializeDB(dbname string) *DBStats {
 	n := new(DBStats)
 	n.Metrics = newMysqlStatPerDB(s.m, dbname)
 	n.Tables = make(map[string]*MysqlStatPerTable)
@@ -106,7 +105,7 @@ func (s *MysqlStats) initializeDB(dbname string) *DBStats {
 }
 
 //check if database struct is instantiated, and instantiate if not
-func (s *MysqlStats) checkDB(dbname string) error {
+func (s *MysqlStatTables) checkDB(dbname string) error {
 	if _, ok := s.DBs[dbname]; !ok {
 		s.DBs[dbname] = s.initializeDB(dbname)
 	}
@@ -114,7 +113,7 @@ func (s *MysqlStats) checkDB(dbname string) error {
 }
 
 //check if table struct is instantiated, and instantiate if not
-func (s *MysqlStats) checkTable(dbname, tblname string) error {
+func (s *MysqlStatTables) checkTable(dbname, tblname string) error {
 	s.checkDB(dbname)
 	if _, ok := s.DBs[dbname].Tables[tblname]; !ok {
 		s.DBs[dbname].Tables[tblname] = newMysqlStatPerTable(s.m, dbname, tblname)
@@ -123,7 +122,7 @@ func (s *MysqlStats) checkTable(dbname, tblname string) error {
 }
 
 //gets sizes of databases
-func (s *MysqlStats) getDBSizes() error {
+func (s *MysqlStatTables) getDBSizes() error {
 	res, err := s.db.QueryReturnColumnDict("SELECT @@GLOBAL.innodb_stats_on_metadata;")
 	if err != nil {
 		return err
@@ -150,7 +149,7 @@ func (s *MysqlStats) getDBSizes() error {
 		//key being the name of the database, value being its size in bytes
 		dbname := string(key)
 		size, _ := strconv.ParseInt(string(value[0]), 10, 64)
-		if size > 0 { //50*1024*1024
+		if size > 0 {
 			s.checkDB(dbname)
 			s.DBs[dbname].Metrics.SizeBytes.Set(float64(size))
 		}
@@ -159,7 +158,7 @@ func (s *MysqlStats) getDBSizes() error {
 }
 
 //gets sizes of tables within databases
-func (s *MysqlStats) getTableSizes() error {
+func (s *MysqlStatTables) getTableSizes() error {
 	res, err := s.db.QueryReturnColumnDict("SELECT @@GLOBAL.innodb_stats_on_metadata;")
 	if err != nil {
 		return err
@@ -183,11 +182,11 @@ func (s *MysqlStats) getTableSizes() error {
 	tbl_count := len(res["tbl"])
 	for i := 0; i < tbl_count; i++ {
 		dbname := string(res["db"][i])
-		s.checkDB(dbname)
 		tblname := string(res["tbl"][i])
 		if res["tbl_size_bytes"][i] == "" {
 			continue
 		}
+		s.checkDB(dbname)
 		size, err := strconv.ParseInt(string(res["tbl_size_bytes"][i]), 10, 64)
 		if err != nil {
 			s.db.Logger.Println(err)
@@ -201,7 +200,7 @@ func (s *MysqlStats) getTableSizes() error {
 }
 
 //get table statistics: rows read, rows changed, rows changed x indices
-func (s *MysqlStats) getTableStatistics() error {
+func (s *MysqlStatTables) getTableStatistics() error {
 	cmd := `
 SELECT table_schema AS db, table_name AS tbl, 
        rows_read, rows_changed, rows_changed_x_indexes  
@@ -213,8 +212,6 @@ SELECT table_schema AS db, table_name AS tbl,
 	}
 	for i, tblname := range res["tbl"] {
 		dbname := res["db"][i]
-		s.checkDB(dbname)
-		s.checkTable(dbname, tblname)
 		rows_read, err := strconv.ParseInt(res["rows_read"][i], 10, 64)
 		if err != nil {
 			s.db.Logger.Println(err)
@@ -227,6 +224,9 @@ SELECT table_schema AS db, table_name AS tbl,
 		if err != nil {
 			s.db.Logger.Println(err)
 		}
+		s.checkDB(dbname)
+		s.checkTable(dbname, tblname)
+
 		s.DBs[dbname].Tables[tblname].RowsRead.Set(uint64(rows_read))
 		s.DBs[dbname].Tables[tblname].RowsChanged.Set(uint64(rows_changed))
 		s.DBs[dbname].Tables[tblname].RowsChangedXIndexes.Set(uint64(rows_changed_x_indexes))

@@ -154,14 +154,14 @@ func makeDsn(dsn map[string]string) string {
 	return dsnString
 }
 
+// create connection to mysql database here
+// when an error is encountered, still return database so that the logger may be used
 func New(user, password, config string) (*MysqlDB, error) {
 	database := new(MysqlDB)
-	// build dsn info here
 	dsn := map[string]string{"db": "information_schema"}
 	creds := map[string]string{"root": "/root/.my.cnf", "nrpe": "/etc/my_nrpe.cnf"}
 
 	database.Logger = log.New(os.Stderr, "LOG: ", log.Lshortfile)
-	database.Logger.Println("test")
 
 	if user == "" {
 		user = DEFAULT_MYSQL_USER
@@ -185,12 +185,12 @@ func New(user, password, config string) (*MysqlDB, error) {
 	_, err := os.Stat(ini_file)
 	if err != nil {
 		fmt.Println(err)
-		return nil, errors.New("'" + ini_file + "' does not exist")
+		return database, errors.New("'" + ini_file + "' does not exist")
 	}
 	// read ini file to get password
 	c, err := conf.ReadConfigFile(ini_file)
 	if err != nil {
-		return nil, err
+		return database, err
 	}
 	pw, err := c.GetString("client", "password")
 	dsn["password"] = strings.Trim(pw, " \"")
@@ -198,13 +198,13 @@ func New(user, password, config string) (*MysqlDB, error) {
 
 	db, err := sql.Open("mysql", database.dsnString)
 	if err != nil {
-		return nil, err
+		return database, err
 	}
 	database.db = db
 
 	err = database.db.Ping()
 	if err != nil {
-		return nil, err
+		return database, err
 	}
 	fmt.Println("connected to " + user + " @ " + dsn["db"])
 	return database, nil
