@@ -6,7 +6,6 @@ package mysqlstattable
 import (
 	"errors"
 	"fmt"
-	"log"
 	"strconv"
 	"time"
 
@@ -15,17 +14,23 @@ import (
 	"github.com/square/prodeng/metrics"
 )
 
+// Structs:
+// MysqlStats - main struct that contains connection to database, metric context, and map to database stats struct
+
 type MysqlStats struct {
 	DBs map[string]*DBStats
 	m   *metrics.MetricContext
 	db  *mysqltools.MysqlDB
 }
 
+//DBStats - database stats struct
+//  contains metrics for databases and map to tables stats struct
 type DBStats struct {
 	Tables  map[string]*MysqlStatPerTable
 	Metrics *MysqlStatPerDB
 }
 
+//  MysqlStatPerTable - metrics for each table
 type MysqlStatPerTable struct {
 	SizeBytes           *metrics.Gauge
 	RowsRead            *metrics.Counter
@@ -33,6 +38,7 @@ type MysqlStatPerTable struct {
 	RowsChangedXIndexes *metrics.Counter
 }
 
+// MysqlStatPerDB - metrics for each database
 type MysqlStatPerDB struct {
 	SizeBytes *metrics.Gauge
 }
@@ -86,7 +92,7 @@ func (s *MysqlStats) Collect() {
 	}
 	for _, err := range collections {
 		if err != nil {
-			log.Print(err)
+			s.db.Logger.Println(err)
 		}
 	}
 }
@@ -123,7 +129,7 @@ func (s *MysqlStats) getDBSizes() error {
 		return err
 	}
 	for _, val := range res {
-		if v, _ := strconv.Atoi(string(val[0])); v == 1 {
+		if v, _ := strconv.ParseInt(string(val[0]), 10, 64); v == 1 {
 			fmt.Println("Not capturing db/tbl sizes because @@GLOBAL.innodb_stats_on_metadata = 1")
 			return errors.New("not capturing sizes: innodb_stats_on_metadata = 1")
 		}
@@ -143,7 +149,7 @@ func (s *MysqlStats) getDBSizes() error {
 	for key, value := range res {
 		//key being the name of the database, value being its size in bytes
 		dbname := string(key)
-		size, _ := strconv.Atoi(string(value[0]))
+		size, _ := strconv.ParseInt(string(value[0]), 10, 64)
 		if size > 0 { //50*1024*1024
 			s.checkDB(dbname)
 			s.DBs[dbname].Metrics.SizeBytes.Set(float64(size))
@@ -159,7 +165,7 @@ func (s *MysqlStats) getTableSizes() error {
 		return err
 	}
 	for _, val := range res {
-		if v, _ := strconv.Atoi(string(val[0])); v == 1 {
+		if v, _ := strconv.ParseInt(string(val[0]), 10, 64); v == int64(1) {
 			fmt.Println("Not capturing db/tbl sizes because @@GLOBAL.innodb_stats_on_metadata = 1")
 			return errors.New("not capturing sizes: innodb_stats_on_metadata = 1")
 		}
@@ -170,21 +176,31 @@ func (s *MysqlStats) getTableSizes() error {
            data_length + index_length AS tbl_size_bytes
       FROM information_schema.TABLES
      WHERE table_schema NOT IN ('performance_schema', 'information_schema', 'mysql');`
-	res, _ = s.db.QueryReturnColumnDict(cmd)
+	res, err = s.db.QueryReturnColumnDict(cmd)
+	if err != nil {
+		return err
+	}
 	tbl_count := len(res["tbl"])
 	for i := 0; i < tbl_count; i++ {
 		dbname := string(res["db"][i])
 		s.checkDB(dbname)
 		tblname := string(res["tbl"][i])
-		size, _ := strconv.Atoi(string(res["tbl_size_bytes"][i]))
+		if res["tbl_size_bytes"][i] == "" {
+			continue
+		}
+		size, err := strconv.ParseInt(string(res["tbl_size_bytes"][i]), 10, 64)
+		if err != nil {
+			s.db.Logger.Println(err)
+		}
 		if size > 0 {
 			s.checkTable(dbname, tblname)
-			s.DBs[dbname].Tables[tblname].SizeBytes.Set(float64(size)) //this is looking way too complex.
+			s.DBs[dbname].Tables[tblname].SizeBytes.Set(float64(size))
 		}
 	}
 	return nil
 }
 
+//get table statistics: rows read, rows changed, rows changed x indices
 func (s *MysqlStats) getTableStatistics() error {
 	cmd := `
 SELECT table_schema AS db, table_name AS tbl, 
@@ -199,17 +215,17 @@ SELECT table_schema AS db, table_name AS tbl,
 		dbname := res["db"][i]
 		s.checkDB(dbname)
 		s.checkTable(dbname, tblname)
-		rows_read, err := strconv.Atoi(res["rows_read"][i])
+		rows_read, err := strconv.ParseInt(res["rows_read"][i], 10, 64)
 		if err != nil {
-			log.Print(err)
+			s.db.Logger.Println(err)
 		}
-		rows_changed, err := strconv.Atoi(res["rows_changed"][i])
+		rows_changed, err := strconv.ParseInt(res["rows_changed"][i], 10, 64)
 		if err != nil {
-			log.Print(err)
+			s.db.Logger.Println(err)
 		}
-		rows_changed_x_indexes, err := strconv.Atoi(res["rows_changed_x_indexes"][i])
+		rows_changed_x_indexes, err := strconv.ParseInt(res["rows_changed_x_indexes"][i], 10, 64)
 		if err != nil {
-			log.Print(err)
+			s.db.Logger.Println(err)
 		}
 		s.DBs[dbname].Tables[tblname].RowsRead.Set(uint64(rows_read))
 		s.DBs[dbname].Tables[tblname].RowsChanged.Set(uint64(rows_changed))

@@ -9,6 +9,7 @@ package mysqltools
 import (
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"regexp"
 	"strconv"
@@ -23,6 +24,7 @@ import _ "github.com/go-sql-driver/mysql"
 type MysqlDB struct {
 	db        *sql.DB
 	dsnString string
+	Logger    *log.Logger
 }
 
 const (
@@ -157,6 +159,9 @@ func New(user, password, config string) (*MysqlDB, error) {
 	// build dsn info here
 	dsn := map[string]string{"db": "information_schema"}
 	creds := map[string]string{"root": "/root/.my.cnf", "nrpe": "/etc/my_nrpe.cnf"}
+
+	database.Logger = log.New(os.Stderr, "LOG: ", log.Lshortfile)
+	database.Logger.Println("test")
 
 	if user == "" {
 		user = DEFAULT_MYSQL_USER
