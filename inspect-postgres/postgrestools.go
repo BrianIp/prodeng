@@ -6,7 +6,11 @@ import (
 	"database/sql"
 	"log"
 
-	_ "github.com/lib/sql"
+	_ "github.com/lib/pq"
+)
+
+const (
+	MAX_RETRIES = 5
 )
 
 type PostgresDB struct {
@@ -17,7 +21,7 @@ type PostgresDB struct {
 
 //wrapper for make_query, where if there is an error querying the database
 // retry connecting to the db and make the query
-func (database *MysqlDB) queryDb(query string) ([]string, [][]string, error) {
+func (database *PostgresDB) queryDb(query string) ([]string, [][]string, error) {
 	var err error
 	for attempts := 0; attempts <= MAX_RETRIES; attempts++ {
 		err = database.db.Ping()
@@ -38,7 +42,7 @@ func (database *MysqlDB) queryDb(query string) ([]string, [][]string, error) {
 // returns array of column names and arrays of data stored as string
 // string equivalent to []byte
 // data stored as 2d array with each subarray containing a single column's data
-func (database *MysqlDB) makeQuery(query string) ([]string, [][]string, error) {
+func (database *PostgresDB) makeQuery(query string) ([]string, [][]string, error) {
 	rows, err := database.db.Query(query)
 	if err != nil {
 		return nil, nil, err
@@ -74,7 +78,7 @@ func (database *MysqlDB) makeQuery(query string) ([]string, [][]string, error) {
 }
 
 //return values of query in a mapping of column_name -> column
-func (database *MysqlDB) QueryReturnColumnDict(query string) (map[string][]string, error) {
+func (database *PostgresDB) QueryReturnColumnDict(query string) (map[string][]string, error) {
 	column_names, values, err := database.queryDb(query)
 	result := make(map[string][]string)
 	for i, col := range column_names {
@@ -84,7 +88,7 @@ func (database *MysqlDB) QueryReturnColumnDict(query string) (map[string][]strin
 }
 
 //return values of query in a mapping of first columns entry -> row
-func (database *MysqlDB) QueryMapFirstColumnToRow(query string) (map[string][]string, error) {
+func (database *PostgresDB) QueryMapFirstColumnToRow(query string) (map[string][]string, error) {
 	_, values, err := database.queryDb(query)
 	result := make(map[string][]string)
 	if len(values) == 0 {
