@@ -2,6 +2,7 @@ package postgresstat
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -16,17 +17,23 @@ type PostgresStat struct {
 	Metrics *PostgresStatMetrics
 	m       *metrics.MetricContext
 	db      *postgrestools.PostgresDB
+	idleCol string
+	idleStr string
 }
 
 type PostgresStatMetrics struct {
-	Uptime          *metrics.Counter
-	Version         *metrics.Gauge
-	TPS             *metrics.Counter
-	BlockReadsDisk  *metrics.Counter
-	BlockReadsCache *metrics.Counter
-	CacheHitPct     *metrics.Gauge
-	CommitRatio     *metrics.Gauge
-	WalKeepSegments *metrics.Gauge
+	Uptime              *metrics.Counter
+	Version             *metrics.Gauge
+	TPS                 *metrics.Counter
+	BlockReadsDisk      *metrics.Counter
+	BlockReadsCache     *metrics.Counter
+	CacheHitPct         *metrics.Gauge
+	CommitRatio         *metrics.Gauge
+	WalKeepSegments     *metrics.Gauge
+	SessionMax          *metrics.Gauge
+	SessionCurrentTotal *metrics.Gauge
+	SessionBusyPct      *metrics.Gauge
+	ConnMaxPct          *metrics.Gauge
 }
 
 func New(m *metrics.MetricContext, Step time.Duration, user, password, config string) (*PostgresStat, error) {
@@ -199,7 +206,7 @@ func (s *PostgresStat) getWalKeepSegments() error {
 }
 
 func (s *PostgresStat) getSessions() error {
-	res, err := s.dbQueryReturnColumnDict("SELECT setting FROM pg_settings WHERE name = 'max_connections';")
+	res, err := s.db.QueryReturnColumnDict("SELECT setting FROM pg_settings WHERE name = 'max_connections';")
 	if err != nil {
 		return err
 	}
@@ -207,17 +214,48 @@ func (s *PostgresStat) getSessions() error {
 	if !ok || len(v) == 0 {
 		return errors.New("Can't get session max")
 	}
-	val, err := strconv.ParseInt(v[0], 10, 64)
+	sessMax, err := strconv.ParseInt(v[0], 10, 64)
 	if err != nil {
 		return err
 	}
-	s.Metrics.SessionMax.Set(float64(val))
+	s.Metrics.SessionMax.Set(float64(sessMax))
 
-	cmd := `
+	cmd := fmt.Sprintf(`
 SELECT (SELECT COUNT(*) FROM pg_stat_activity 
          WHERE %s = '%s') AS idle,
        (SELECT COUNT(*) FROM pg_stat_activity 
-         WHERE %s != '%s') AS active;`
-	//TODO: idle column and idle string found in get sessions
+         WHERE %s != '%s') AS active;`, s.idleCol, s.idleStr, s.idleCol, s.idleStr)
+
+	res, err = s.db.QueryReturnColumnDict(cmd)
+	if err != nil {
+		return err
+	}
+	idle := int64(0)
+	v, ok = res["idle"]
+	if ok || len(v) > 0 {
+		idle, err = strconv.ParseInt(v[0], 10, 64)
+		if err != nil {
+			s.db.Logger.Print(err)
+		}
+	}
+	active := int64(0)
+	v, ok = res["active"]
+	if ok || len(v) > 0 {
+		active, err = strconv.ParseInt(v[0], 10, 64)
+		if err != nil {
+			s.db.Logger.Print(err)
+		}
+	}
+	total := float64(active + idle)
+	s.Metrics.SessionCurrentTotal.Set(total)
+	s.Metrics.SessionBusyPct.Set((float64(active) / total) * 100)
+	s.Metrics.ConnMaxPct.Set(float64(total/float64(sessMax)) * 100.0)
 	return errors.New("not implemented")
+}
+
+func (s *PostgresStat) getOldest() error {
+	info := map[string]string{"xact_start": "oldest_trx_s", "query_start": "oldest_query_s"}
+	for col, infocol := range info {
+
+	}
 }
