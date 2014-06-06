@@ -14,26 +14,32 @@ import (
 )
 
 type PostgresStat struct {
-	Metrics *PostgresStatMetrics
-	m       *metrics.MetricContext
-	db      *postgrestools.PostgresDB
-	idleCol string
-	idleStr string
+	Metrics  *PostgresStatMetrics
+	m        *metrics.MetricContext
+	db       *postgrestools.PostgresDB
+	idleCol  string
+	idleStr  string
+	queryCol string
+	pidCol   string
 }
 
 type PostgresStatMetrics struct {
-	Uptime              *metrics.Counter
-	Version             *metrics.Gauge
-	TPS                 *metrics.Counter
-	BlockReadsDisk      *metrics.Counter
-	BlockReadsCache     *metrics.Counter
-	CacheHitPct         *metrics.Gauge
-	CommitRatio         *metrics.Gauge
-	WalKeepSegments     *metrics.Gauge
-	SessionMax          *metrics.Gauge
-	SessionCurrentTotal *metrics.Gauge
-	SessionBusyPct      *metrics.Gauge
-	ConnMaxPct          *metrics.Gauge
+	Uptime               *metrics.Counter
+	Version              *metrics.Gauge
+	TPS                  *metrics.Counter
+	BlockReadsDisk       *metrics.Counter
+	BlockReadsCache      *metrics.Counter
+	CacheHitPct          *metrics.Gauge
+	CommitRatio          *metrics.Gauge
+	WalKeepSegments      *metrics.Gauge
+	SessionMax           *metrics.Gauge
+	SessionCurrentTotal  *metrics.Gauge
+	SessionBusyPct       *metrics.Gauge
+	ConnMaxPct           *metrics.Gauge
+	OldestTrxS           *metrics.Gauge
+	OldestQueryS         *metrics.Gauge
+	ActiveLongRunQueries *metrics.Gauge
+	LockWaiters          *metrics.Gauge
 }
 
 func New(m *metrics.MetricContext, Step time.Duration, user, password, config string) (*PostgresStat, error) {
@@ -250,12 +256,79 @@ SELECT (SELECT COUNT(*) FROM pg_stat_activity
 	s.Metrics.SessionCurrentTotal.Set(total)
 	s.Metrics.SessionBusyPct.Set((float64(active) / total) * 100)
 	s.Metrics.ConnMaxPct.Set(float64(total/float64(sessMax)) * 100.0)
-	return errors.New("not implemented")
+	return nil
 }
 
 func (s *PostgresStat) getOldest() error {
-	info := map[string]string{"xact_start": "oldest_trx_s", "query_start": "oldest_query_s"}
-	for col, infocol := range info {
-
+	info := map[string]*metrics.Gauge{"xact_start": s.Metrics.OldestTrxS, "query_start": s.Metrics.OldestQueryS}
+	for col, metric := range info {
+		cmd := fmt.Sprintf(`
+SELECT EXTRACT(epoch FROM NOW()) - EXTRACT(epoch FROM %s) 
+  FROM pg_stat_activity 
+ WHERE %s != '%s'
+   AND UPPER(%s) NOT LIKE '%%VACUUM%%'
+ ORDER BY 1 DESC LIMIT 1;`, col, s.idleCol, s.idleStr, s.queryCol)
+		res, err := s.db.QueryReturnColumnDict(cmd)
+		if err != nil {
+			return err
+		}
+		for _, v := range res {
+			if len(v) == 0 {
+				return errors.New("cant get oldest")
+			}
+			val, err := strconv.ParseFloat(v[0], 64)
+			if err != nil {
+				s.db.Logger.Println(err)
+			}
+			metric.Set(val)
+		}
 	}
+	return nil
+}
+
+func (s *PostgresStat) getNumLongEntries() error {
+	threshold := "30"
+	cmd := fmt.Sprintf(`SELECT * FROM pg_stat_activity 
+ WHERE EXTRACT(epoch FROM NOW()) - EXTRACT(epoch FROM query_start) > %s
+   AND %s != '%s';`, threshold, s.idleCol, s.idleStr)
+	res, err := s.db.QueryReturnColumnDict(cmd)
+	if err != nil {
+		return err
+	}
+	for _, col := range res {
+		s.Metrics.ActiveLongRunQueries.Set(float64(len(col)))
+		return nil
+	}
+	return nil
+}
+
+func (s *PostgresStat) getLocks() error {
+	cmd := fmt.Sprintf(`
+SELECT bl.pid                 AS blocked_pid,
+       a.usename              AS blocked_user,
+       ka.%s       AS blocking_statement,
+       NOW() - ka.query_start AS blocking_duration,
+       kl.pid                 AS blocking_pid,
+       ka.usename             AS blocking_user,
+       a.%s        AS blocked_statement,
+       NOW() - a.query_start  AS blocked_duration
+  FROM pg_catalog.pg_locks bl
+  JOIN pg_catalog.pg_stat_activity a
+    ON a.%s = bl.pid
+  JOIN pg_catalog.pg_locks kl 
+    ON kl.transactionid = bl.transactionid AND kl.pid != bl.pid
+  JOIN pg_catalog.pg_stat_activity ka ON ka.%s = kl.pid
+ WHERE NOT bl.granted;`, s.queryCol, s.queryCol, s.pidCol, s.pidCol)
+	res, err := s.db.QueryReturnColumnDict(cmd)
+	if err != nil {
+		return err
+	}
+	for _, col := range res {
+		s.Metrics.LockWaiters(float64(len(col)))
+		break
+	}
+	cmd = "SELECT mode, COUNT(*) FROM pg_locks WHERE granted GROUP BY 1;"
+	res, err = s.db.QueryReturnColumnDict(cmd)
+	//TODO: look into column names here
+
 }
