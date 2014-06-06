@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -19,14 +21,25 @@ type PostgresStat struct {
 	m        *metrics.MetricContext
 	db       *postgrestools.PostgresDB
 	DBs      map[string]*DBMetrics
+	Modes    map[string]*ModeMetrics
 	idleCol  string
 	idleStr  string
 	queryCol string
 	pidCol   string
 	PGDATA   string
+	dsn      map[string]string
+}
+
+type ModeMetrics struct {
+	Locks *metrics.Gauge
 }
 
 type DBMetrics struct {
+	Tables    map[string]*TableMetrics
+	SizeBytes *metrics.Gauge
+}
+
+type TableMetrics struct {
 	SizeBytes *metrics.Gauge
 }
 
@@ -52,19 +65,23 @@ type PostgresStatMetrics struct {
 	VSZ                  *metrics.Gauge
 	RSS                  *metrics.Gauge
 	UnsecureUsers        *metrics.Gauge
-	Writable             *metrics.Gauge
+	Writable             *metrics.Gauge //0 if not writable, 1 if writable
 	BackupsRunning       *metrics.Gauge
 	BinlogFiles          *metrics.Gauge
 	DBSizeBinlogs        *metrics.Gauge
 	SecondsBehindMaster  *metrics.Gauge
 	SlavesConnectedToMe  *metrics.Gauge
+	VacuumsAutoRunning   *metrics.Gauge
+	VacuumsManualRunning *metrics.Gauge
+	SlaveBytesBehindMe   *metrics.Gauge
 }
 
 func New(m *metrics.MetricContext, Step time.Duration, user, password, config string) (*PostgresStat, error) {
 	s := new(PostgresStat)
 
+	dsn := map[string]string{"dbname": "postgres", "user": "postgres"}
 	var err error
-	s.db, err = postgrestools.New()
+	s.db, err = postgrestools.New(dsn)
 	if err != nil {
 		s.db.Logger.Println(err)
 		return nil, err
@@ -92,17 +109,32 @@ func PostgresStatMetricsNew(m *metrics.MetricContext, Step time.Duration) *Postg
 //checks for initialization of db metrics
 func (s *PostgresStat) checkDB(dbname string) error {
 	if _, ok := s.DBs[dbname]; !ok {
-		s.DBs[dbname] = s.initializeDB(dbname)
+		o := new(DBMetrics)
+		o.Tables = make(map[string]*TableMetrics)
+		misc.InitializeMetrics(o, s.m, "postgresstat."+dbname, true)
+		s.DBs[dbname] = o
 	}
 	return nil
 }
 
-func (s *PostgresStat) initializeDB(dbname string) *DBMetrics {
-	o := new(DBMetrics)
-	misc.InitializeMetrics(o, s.m, "postgresstat."+dbname, true)
-	return o
+func (s *PostgresStat) checkMode(name string) error {
+	if _, ok := s.Modes[name]; !ok {
+		o := new(ModeMetrics)
+		misc.InitializeMetrics(o, s.m, "postgresstat.lock"+name, true)
+		s.Modes[name] = o
+	}
+	return nil
 }
 
+func (s *PostgresStat) checkTable(dbname, tblname string) error {
+	s.checkDB(dbname)
+	if _, ok := s.DBs[dbname].Tables[tblname]; !ok {
+		o := new(TableMetrics)
+		misc.InitializeMetrics(o, s.m, "postgresstat."+dbname+"."+tblname, true)
+		s.DBs[dbname].Tables[tblname] = o
+	}
+	return nil
+}
 func (s *PostgresStat) Collect() {
 	collects := []error{
 		s.getUptime(),
@@ -148,6 +180,17 @@ func (s *PostgresStat) getVersion() error {
 	ver, err := strconv.ParseFloat(version, 64)
 	ver /= math.Pow(10.0, float64(len(version))-leading)
 	s.Metrics.Version.Set(ver)
+	if ver >= 9.02 {
+		s.pidCol = "pid"
+		s.queryCol = "query"
+		s.idleCol = "state"
+		s.idleStr = "idle"
+	} else {
+		s.pidCol = "procpid"
+		s.queryCol = "current_query"
+		s.idleCol = s.queryCol
+		s.idleStr = "<IDLE>"
+	}
 	return err
 }
 
@@ -350,31 +393,45 @@ SELECT bl.pid                 AS blocked_pid,
 		break
 	}
 	cmd = "SELECT mode, COUNT(*) AS count FROM pg_locks WHERE granted GROUP BY 1;"
-	res, err = s.db.QueryReturnColumnDict(cmd)
-	//TODO: look into column names here
+	res, err = s.db.QueryMapFirstColumnToRow(cmd)
+	for mode, locks := range res {
+		lock, _ := strconv.ParseInt(locks[0], 10, 64)
+		s.checkMode(mode)
+		s.Modes[mode].Locks.Set(float64(lock))
+	}
 	return nil
 }
 
-/*
 func (s *PostgresStat) getVacuumsInProgress() error {
-    cmd := s.Sprintf(`
+	cmd := fmt.Sprintf(`
 SELECT * FROM pg_stat_activity
- WHERE UPPER(%s) LIKE '%%VACUUM%%';`, s.querCol)
-    res, err := s.db.QueryReturnColumnDict(cmd)
-    if err != nil {
-      return err
-    }
-    auto := 0
-    manual := 0
-    for i, val := res[s.queryCol] {
-        if strings.Contains(val, "datfrozenxid") {
-          continue
-        }
-        m, err := regexp.MustCompile("(?i)(\s*autovacuum:\s*)?(\s*VACUUM\s*)?(\s*ANALYZE\s*)?\s*(.+?)$").
-    }
-    //TODO: wtf this is so long
+ WHERE UPPER(%s) LIKE '%%VACUUM%%';`, s.queryCol)
+	res, err := s.db.QueryReturnColumnDict(cmd)
+	if err != nil {
+		return err
+	}
+	auto := 0
+	manual := 0
+	for _, querC := range res[s.queryCol] {
+		if strings.Contains(querC, "datfrozenxid") {
+			continue
+		}
+		m := regexp.MustCompile("(?i)(\\s*autovacuum:\\s*)?(\\s*VACUUM\\s*)?(\\s*ANALYZE\\s*)?\\s*(.+?)$").FindStringSubmatch(querC)
+
+		//TODO: extras
+		if len(m) > 0 {
+			if strings.HasPrefix(querC, "autovacuum:") {
+				auto += 1
+			} else {
+				manual += 1
+			}
+		}
+	}
+	s.Metrics.VacuumsAutoRunning.Set(float64(auto))
+	s.Metrics.VacuumsManualRunning.Set(float64(manual))
+	return nil
 }
-*/
+
 func (s *PostgresStat) getMainProcessInfo() error {
 	out, err := exec.Command("ps", "aux").Output()
 	if err != nil {
@@ -417,17 +474,17 @@ func (s *PostgresStat) getWriteability() error {
 		s.Metrics.Writable.Set(float64(0))
 	}
 	cmd := `
-CREATE TABLE IF NOT EXISTS postgres_health.postgres_health 
- (id INT PRIMARY KEY, stamp TIMESTAMP);`
+        CREATE TABLE IF NOT EXISTS postgres_health.postgres_health 
+         (id INT PRIMARY KEY, stamp TIMESTAMP);`
 	_, err = s.db.QueryReturnColumnDict(cmd)
 	if err != nil {
 		s.Metrics.Writable.Set(float64(0))
 	}
 	cmd = `
-BEGIN;
-DELETE FROM postgres_health.postgres_health;
-INSERT INTO postgres_health.postgres_health VALUES (1, NOW());
-COMMIT;`
+        BEGIN;
+        DELETE FROM postgres_health.postgres_health;
+        INSERT INTO postgres_health.postgres_health VALUES (1, NOW());
+        COMMIT;`
 	_, err = s.db.QueryReturnColumnDict(cmd)
 	if err != nil {
 		s.Metrics.Writable.Set(float64(0))
@@ -477,8 +534,40 @@ func (s *PostgresStat) getSizes() error {
 			s.DBs[dbname].SizeBytes.Set(float64(size))
 		}
 	}
+	for dbname, _ := range res {
+		newDsn := make(map[string]string)
+		for k, v := range s.dsn {
+			newDsn[k] = v
+		}
+		newDsn["dbname"] = dbname
+		newDB, err := postgrestools.New(newDsn)
+		if err != nil {
+			s.db.Logger.Println(err)
+			continue
+		}
+		cmd = `
+          SELECT nspname || '.' || relname AS relation,
+                 PG_TOTAL_RELATION_SIZE(C.oid) AS total_size
+            FROM pg_class C
+            LEFT JOIN pg_namespace N ON (N.oid = C.relnamespace)
+           WHERE nspname NOT IN ('pg_catalog', 'information_schema')
+             AND C.relkind <> 'i'
+             AND nspname !~ '^pg_toast'
+           ORDER BY pg_total_relation_size(C.oid) DESC;`
+		res, err := newDB.QueryMapFirstColumnToRow(cmd)
+		if err != nil {
+			s.db.Logger.Println(err)
+		}
+		for relation, sizes := range res {
+			size, _ := strconv.ParseInt(sizes[0], 10, 64)
+			if size > 0 {
+				s.checkTable(dbname, relation)
+				s.DBs[dbname].Tables[relation].SizeBytes.Set(float64(size))
+			}
+		}
+		newDB.Close()
+	}
 	return nil
-	//TODO: per table sizes
 }
 
 func (s *PostgresStat) getBackups() error {
@@ -500,13 +589,12 @@ func (s *PostgresStat) getBackups() error {
 		}
 	}
 	s.Metrics.BackupsRunning.Set(float64(backupProcs))
-	//TODO: timestamping needed?
 	return nil
 }
 
 func (s *PostgresStat) getSecondsBehindMaster() error {
-	//  recoveryConfFile := s.PGDATA + "/recovery.conf"
-	//  recoveryDoneFile := s.PGDATA + "/recovery.done"
+	recoveryConfFile := s.PGDATA + "/recovery.conf"
+	recoveryDoneFile := s.PGDATA + "/recovery.done"
 	cmd := `
 SELECT EXTRACT(epoch FROM NOW()) 
      - EXTRACT(epoch FROM pg_last_xact_replay_timestamp()) AS seconds;`
@@ -523,7 +611,14 @@ SELECT EXTRACT(epoch FROM NOW())
 		return err
 	}
 	s.Metrics.SecondsBehindMaster.Set(float64(seconds))
-	//TODO: check conf files?
+	_, confErr := os.Stat(recoveryConfFile)
+	if confErr == nil {
+		s.Metrics.SecondsBehindMaster.Set(float64(-1))
+	}
+	_, doneErr := os.Stat(recoveryDoneFile)
+	if doneErr == nil && os.IsNotExist(confErr) {
+		s.Metrics.SecondsBehindMaster.Set(float64(-1))
+	}
 	return nil
 }
 
@@ -536,6 +631,36 @@ SELECT pg_current_xlog_location(), write_location, client_hostname
 		return err
 	}
 	s.Metrics.SlavesConnectedToMe.Set(float64(len(res["client_hostname"])))
+	for _, val := range res["pg_current_xlog_location()"] {
+		str := strings.Split(val, "/")
+		if len(str) < 2 {
+			return errors.New("Can't get slave delay bytes")
+		}
+		var masterFile, masterPos, slaveFile, slavePos int64
+		masterFile, err = strconv.ParseInt(str[0], 16, 64)
+		if err != nil {
+			masterFile, _ = strconv.ParseInt(str[0], 0, 64)
+		}
+		masterPos, _ = strconv.ParseInt(str[1], 16, 64)
+		if err != nil {
+			masterPos, _ = strconv.ParseInt(str[1], 0, 64)
+		}
+		str = strings.Split(res["write_location"][0], "/")
+		if len(str) < 2 {
+			return errors.New("Can't get slave delay bytes")
+		}
+		slaveFile, _ = strconv.ParseInt(str[0], 16, 64)
+		if err != nil {
+			slaveFile, _ = strconv.ParseInt(str[0], 0, 64)
+		}
+		slavePos, _ = strconv.ParseInt(str[1], 16, 64)
+		if err != nil {
+			slavePos, _ = strconv.ParseInt(str[1], 0, 64)
+		}
+		segmentSize, _ := strconv.ParseInt("0xFFFFFFFF", 0, 64)
+		r := ((masterFile * segmentSize) + masterPos) - ((slaveFile * segmentSize) + slavePos)
+		s.Metrics.SlaveBytesBehindMe.Set(float64(r))
+	}
 	return nil
 }
 

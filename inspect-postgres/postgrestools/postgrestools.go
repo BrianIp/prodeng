@@ -105,8 +105,7 @@ func (database *PostgresDB) QueryMapFirstColumnToRow(query string) (map[string][
 }
 
 //New creates connection to postgres database
-func New() (*PostgresDB, error) {
-	dsn := map[string]string{"dbname": "postgres", "user": "postgres"}
+func New(dsn map[string]string) (*PostgresDB, error) {
 	dsnString := makeDsn(dsn)
 
 	pgdb := new(PostgresDB)
@@ -129,4 +128,8 @@ func makeDsn(dsn map[string]string) string {
 		dsnString += " " + key + "=" + value
 	}
 	return dsnString
+}
+
+func (database *PostgresDB) Close() {
+	database.db.Close()
 }
