@@ -117,6 +117,7 @@ func (s *PostgresStat) checkDB(dbname string) error {
 	return nil
 }
 
+//checks for initialization of lock mode metrics
 func (s *PostgresStat) checkMode(name string) error {
 	if _, ok := s.Modes[name]; !ok {
 		o := new(ModeMetrics)
@@ -126,6 +127,7 @@ func (s *PostgresStat) checkMode(name string) error {
 	return nil
 }
 
+//checks for intialization of table metrics
 func (s *PostgresStat) checkTable(dbname, tblname string) error {
 	s.checkDB(dbname)
 	if _, ok := s.DBs[dbname].Tables[tblname]; !ok {
@@ -135,9 +137,11 @@ func (s *PostgresStat) checkTable(dbname, tblname string) error {
 	}
 	return nil
 }
+
+//runs metrics collections
 func (s *PostgresStat) Collect() {
 	collects := []error{
-		s.getUptime(),
+		s.getUptime(), //limit to uptime while testing connections
 	}
 	for _, err := range collects {
 		if err != nil {
