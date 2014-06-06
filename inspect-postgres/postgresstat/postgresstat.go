@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -40,6 +41,10 @@ type PostgresStatMetrics struct {
 	OldestQueryS         *metrics.Gauge
 	ActiveLongRunQueries *metrics.Gauge
 	LockWaiters          *metrics.Gauge
+	CpuPct               *metrics.Gauge
+	MemPct               *metrics.Gauge
+	VSZ                  *metrics.Gauge
+	RSS                  *metrics.Gauge
 }
 
 func New(m *metrics.MetricContext, Step time.Duration, user, password, config string) (*PostgresStat, error) {
@@ -330,5 +335,79 @@ SELECT bl.pid                 AS blocked_pid,
 	cmd = "SELECT mode, COUNT(*) FROM pg_locks WHERE granted GROUP BY 1;"
 	res, err = s.db.QueryReturnColumnDict(cmd)
 	//TODO: look into column names here
+	return nil
+}
 
+/*
+func (s *PostgresStat) getVacuumsInProgress() error {
+    cmd := s.Sprintf(`
+SELECT * FROM pg_stat_activity
+ WHERE UPPER(%s) LIKE '%%VACUUM%%';`, s.querCol)
+    res, err := s.db.QueryReturnColumnDict(cmd)
+    if err != nil {
+      return err
+    }
+    auto := 0
+    manual := 0
+    for i, val := res[s.queryCol] {
+        if strings.Contains(val, "datfrozenxid") {
+          continue
+        }
+        m, err := regexp.MustCompile("(?i)(\s*autovacuum:\s*)?(\s*VACUUM\s*)?(\s*ANALYZE\s*)?\s*(.+?)$").
+    }
+    //TODO: wtf this is so long
+}
+*/
+func (s *PostgresStat) getMainProcesInfo() error {
+	out, err := exec.Commmand("ps", "aux").Output()
+	if err != nil {
+		return err
+	}
+	blob := string(out)
+	lines := strings.Split(blob, "\n")
+	info := make([][]string, 10)
+	//TODO: if this gets used more than once, make into own function
+	//mapping for info: 0-user, 1-pid, 2-cpu, 3-mem, 4-vsz, 5-rss, 6-tty, 7-stat, 8-start, 9-time, 10-cmd
+
+	for _, line := range lines {
+		line = strings.Trim(line, " ")
+
+		if len(words) < 10 {
+			continue
+		}
+		cmd := strings.Join(words[10:], " ")
+
+		if strings.Contains(cmd, "postmaster") {
+			words := strings.Split(line, " ")
+
+			for i, word := range words {
+				info[i] = append(info[i], word)
+			}
+			cpu, _ := strconv.ParseFloat(info[2], 64) //TODO: correctly handle these errors
+			mem, _ := strconv.ParseFloat(info[3], 64)
+			vsz, _ := strconv.ParseFloat(info[4], 64)
+			rss, _ := strconv.ParseFloat(info[5], 64)
+			s.Metrics.CpuPct.Set(cpu)
+			s.Metrics.MemPct.Set(mem)
+			s.Metrics.VSZ.Set(vsz)
+			s.Metrics.RSS.Set(rss)
+		}
+	}
+	return nil
+}
+
+func (s *PostgresStat) getWriteability() error {
+	return nil
+}
+
+func (s *PostgresStat) getSecurity() error {
+	cmd := "SELECT usename FROM pg_shadow WHERE passwd IS NULL;"
+	res, err := s.db.QueryReturnColumnRows(cmd)
+	if err != nil {
+		return err
+	}
+	if len(res) > 0 {
+		s.Metrics.UnsecureUsers.Set(uint64(len(res)))
+	}
+	return nil
 }
