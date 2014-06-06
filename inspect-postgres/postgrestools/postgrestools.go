@@ -5,6 +5,7 @@ package postgrestools
 import (
 	"database/sql"
 	"log"
+	"os"
 
 	_ "github.com/lib/pq"
 )
@@ -109,6 +110,7 @@ func New(dsn map[string]string) (*PostgresDB, error) {
 	dsnString := makeDsn(dsn)
 
 	pgdb := new(PostgresDB)
+	pgdb.Logger = log.New(os.Stderr, "LOG: ", log.Lshortfile)
 	db, err := sql.Open("postgres", dsnString)
 	if err != nil {
 		return pgdb, err

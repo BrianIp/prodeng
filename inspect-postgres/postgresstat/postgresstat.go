@@ -76,10 +76,10 @@ type PostgresStatMetrics struct {
 	SlaveBytesBehindMe   *metrics.Gauge
 }
 
-func New(m *metrics.MetricContext, Step time.Duration, user, password, config string) (*PostgresStat, error) {
+func New(m *metrics.MetricContext, Step time.Duration, user, config string) (*PostgresStat, error) {
 	s := new(PostgresStat)
 
-	dsn := map[string]string{"dbname": "postgres", "user": "postgres"}
+	dsn := map[string]string{"dbname": "postgres", "user": "postgres", "sslmode": "disable"}
 	var err error
 	s.db, err = postgrestools.New(dsn)
 	if err != nil {
@@ -635,7 +635,7 @@ SELECT pg_current_xlog_location(), write_location, client_hostname
 		str := strings.Split(val, "/")
 		if len(str) < 2 {
 			return errors.New("Can't get slave delay bytes")
-		}
+		} //This part can probably be cleaned up a bit when the exact format is figured out
 		var masterFile, masterPos, slaveFile, slavePos int64
 		masterFile, err = strconv.ParseInt(str[0], 16, 64)
 		if err != nil {
