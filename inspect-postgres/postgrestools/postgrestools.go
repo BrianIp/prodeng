@@ -3,9 +3,12 @@
 package postgrestools
 
 import (
+	"bytes"
 	"database/sql"
+	//	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	_ "github.com/lib/pq"
 )
@@ -17,6 +20,7 @@ const (
 type PostgresDB struct {
 	db        *sql.DB
 	dsnString string
+	Dsn       map[string]string
 	Logger    *log.Logger
 }
 
@@ -107,10 +111,23 @@ func (database *PostgresDB) QueryMapFirstColumnToRow(query string) (map[string][
 
 //New creates connection to postgres database
 func New(dsn map[string]string) (*PostgresDB, error) {
-	dsnString := makeDsn(dsn)
-
+	//	fmt.Println("Connecting to database")
 	pgdb := new(PostgresDB)
 	pgdb.Logger = log.New(os.Stderr, "LOG: ", log.Lshortfile)
+
+	//TODO: parse input file for password
+	conf_file := "/var/lib/pgsql/.pgpass"
+	_, err := os.Stat(conf_file)
+	file, err := os.Open(conf_file)
+	data := make([]byte, 100)
+	_, err = file.Read(data)
+	data = bytes.Trim(data, "\x00")
+	tmp := strings.Split(string(data), ":")
+	pw := strings.TrimSpace(tmp[len(tmp)-1])
+	dsn["password"] = strings.TrimSpace(pw)
+	dsnString := makeDsn(dsn)
+	pgdb.Dsn = dsn
+	pgdb.dsnString = dsnString
 	db, err := sql.Open("postgres", dsnString)
 	if err != nil {
 		return pgdb, err
@@ -120,7 +137,7 @@ func New(dsn map[string]string) (*PostgresDB, error) {
 		return pgdb, err
 	}
 	pgdb.db = db
-
+	//	fmt.Println("Connected!")
 	return pgdb, nil
 }
 
@@ -129,7 +146,7 @@ func makeDsn(dsn map[string]string) string {
 	for key, value := range dsn {
 		dsnString += " " + key + "=" + value
 	}
-	return dsnString
+	return strings.Trim(dsnString, " ")
 }
 
 func (database *PostgresDB) Close() {

@@ -16,6 +16,7 @@ import (
 	"github.com/square/prodeng/metrics"
 )
 
+//PostgresStat stores info on the db
 type PostgresStat struct {
 	Metrics  *PostgresStatMetrics
 	m        *metrics.MetricContext
@@ -30,19 +31,24 @@ type PostgresStat struct {
 	dsn      map[string]string
 }
 
+//ModeMetrics - metrics on lock modes
 type ModeMetrics struct {
 	Locks *metrics.Gauge
 }
 
+//DBMetrics - includes metrics for dbs
+// and a mapping to tables in the db
 type DBMetrics struct {
 	Tables    map[string]*TableMetrics
 	SizeBytes *metrics.Gauge
 }
 
+//TableMetrics - metrics for each table
 type TableMetrics struct {
 	SizeBytes *metrics.Gauge
 }
 
+//PostgresStatMetrics
 type PostgresStatMetrics struct {
 	Uptime               *metrics.Counter
 	Version              *metrics.Gauge
@@ -76,12 +82,17 @@ type PostgresStatMetrics struct {
 	SlaveBytesBehindMe   *metrics.Gauge
 }
 
+//Opens connection to postgres database and starts collector for metrics
 func New(m *metrics.MetricContext, Step time.Duration, user, config string) (*PostgresStat, error) {
 	s := new(PostgresStat)
 
-	dsn := map[string]string{"dbname": "postgres", "user": "postgres", "sslmode": "disable"}
+	dsn := map[string]string{"dbname": "postgres", "user": user, "sslmode": "disable", "host": "localhost"}
 	var err error
+	s.Modes = make(map[string]*ModeMetrics)
+	s.DBs = make(map[string]*DBMetrics)
 	s.db, err = postgrestools.New(dsn)
+	s.m = m
+	s.PGDATA = "/data/pgsql"
 	if err != nil {
 		s.db.Logger.Println(err)
 		return nil, err
@@ -100,6 +111,7 @@ func New(m *metrics.MetricContext, Step time.Duration, user, config string) (*Po
 	return s, nil
 }
 
+//Initializes PostgresStatMetrics
 func PostgresStatMetricsNew(m *metrics.MetricContext, Step time.Duration) *PostgresStatMetrics {
 	c := new(PostgresStatMetrics)
 	misc.InitializeMetrics(c, m, "postgresstat", true)
@@ -107,84 +119,97 @@ func PostgresStatMetricsNew(m *metrics.MetricContext, Step time.Duration) *Postg
 }
 
 //checks for initialization of db metrics
-func (s *PostgresStat) checkDB(dbname string) error {
+func (s *PostgresStat) checkDB(dbname string) {
 	if _, ok := s.DBs[dbname]; !ok {
 		o := new(DBMetrics)
 		o.Tables = make(map[string]*TableMetrics)
 		misc.InitializeMetrics(o, s.m, "postgresstat."+dbname, true)
 		s.DBs[dbname] = o
 	}
-	return nil
+
 }
 
 //checks for initialization of lock mode metrics
-func (s *PostgresStat) checkMode(name string) error {
+func (s *PostgresStat) checkMode(name string) {
 	if _, ok := s.Modes[name]; !ok {
 		o := new(ModeMetrics)
 		misc.InitializeMetrics(o, s.m, "postgresstat.lock"+name, true)
 		s.Modes[name] = o
 	}
-	return nil
+
 }
 
 //checks for intialization of table metrics
-func (s *PostgresStat) checkTable(dbname, tblname string) error {
+func (s *PostgresStat) checkTable(dbname, tblname string) {
 	s.checkDB(dbname)
 	if _, ok := s.DBs[dbname].Tables[tblname]; !ok {
 		o := new(TableMetrics)
 		misc.InitializeMetrics(o, s.m, "postgresstat."+dbname+"."+tblname, true)
 		s.DBs[dbname].Tables[tblname] = o
 	}
-	return nil
+
 }
 
 //runs metrics collections
 func (s *PostgresStat) Collect() {
-	collects := []error{
-		s.getUptime(), //limit to uptime while testing connections
-	}
-	for _, err := range collects {
-		if err != nil {
-			s.db.Logger.Println(err)
-		}
-	}
+	go s.getUptime()
+	go s.getVersion()
+	go s.getTPS()
+	go s.getCacheInfo()
+	go s.getCommitRatio()
+	go s.getWalKeepSegments()
+	go s.getSessions()
+	go s.getOldest()
+	go s.getNumLongEntries()
+	go s.getLocks()
+	go s.getVacuumsInProgress()
+	go s.getMainProcessInfo()
+	go s.getSizes()
+	go s.getSecondsBehindMaster()
+	go s.getSlaveDelayBytes()
+	go s.getSecurity()
+	go s.getBackups()
 }
 
 //get uptime
-func (s *PostgresStat) getUptime() error {
+func (s *PostgresStat) getUptime() {
 	cmd := `
   SELECT EXTRACT(epoch FROM now())
        - EXTRACT(epoch From pg_postmaster_start_time()) AS uptime;`
 	res, err := s.db.QueryReturnColumnDict(cmd)
 	if err != nil {
-		return err
+		s.db.Logger.Println(err)
+		return
 	}
 	v, ok := res["uptime"]
 	if !ok || len(v) == 0 {
-		return errors.New("Couldn't get uptime")
+		s.db.Logger.Println(errors.New("Couldn't get uptime"))
+		return
 	}
-	time, err := strconv.ParseInt(v[0], 10, 64)
+	time, err := strconv.ParseFloat(v[0], 64)
 	s.Metrics.Uptime.Set(uint64(time))
-	return err
+	if err != nil {
+		s.db.Logger.Println(err)
+	}
 }
 
 //get version
 //looks like:
 //  'PostgreSQL 9.1.5 on x86_64-unknown-linux-gnu....'
-func (s *PostgresStat) getVersion() error {
-	res, err := s.db.QueryReturnColumnDict("SELECT VERSION();")
-	if err != nil || len(res["Version()"]) == 0 {
-		return errors.New("Couldn't get version")
+func (s *PostgresStat) getVersion() {
+	res, err := s.db.QueryReturnColumnDict("SELECT VERSION() AS version;")
+	if err != nil || len(res["version"]) == 0 {
+		s.db.Logger.Println(errors.New("Couldn't get version"))
+		return
 	}
-	version := res["Version()"][0]
-	//filter out letters'
+	version := res["version"][0]
 	version = strings.Split(version, " ")[1]
 	leading := float64(len(strings.Split(version, ".")[0]))
 	version = strings.Replace(version, ".", "", -1)
 	ver, err := strconv.ParseFloat(version, 64)
 	ver /= math.Pow(10.0, float64(len(version))-leading)
 	s.Metrics.Version.Set(ver)
-	if ver >= 9.02 {
+	if ver >= 9.2 {
 		s.pidCol = "pid"
 		s.queryCol = "query"
 		s.idleCol = "state"
@@ -195,37 +220,46 @@ func (s *PostgresStat) getVersion() error {
 		s.idleCol = s.queryCol
 		s.idleStr = "<IDLE>"
 	}
-	return err
+	if err != nil {
+		s.db.Logger.Println(err)
+	}
 }
 
-func (s *PostgresStat) getTPS() error {
-	//This is only writes? idk
+//get TPS
+func (s *PostgresStat) getTPS() {
 	cmd := "SELECT SUM(xact_commit + xact_rollback) AS tps FROM pg_stat_database;"
 	res, err := s.db.QueryReturnColumnDict(cmd)
 	if err != nil {
-		return err
+		s.db.Logger.Println(err)
+		return
 	}
 	v, ok := res["tps"]
 	if !ok || len(v) == 0 {
-		return errors.New("Unable to get tps")
+		s.db.Logger.Println(errors.New("Unable to get tps"))
+		return
 	}
 	val, err := strconv.ParseInt(v[0], 10, 64)
 	s.Metrics.TPS.Set(uint64(val))
-	return err
+	if err != nil {
+		s.db.Logger.Println(err)
+	}
+
 }
 
-func (s *PostgresStat) getCacheInfo() error {
+//get cache info
+func (s *PostgresStat) getCacheInfo() {
 	cmd := "SELECT SUM(blks_read) AS block_reads_disk, SUM(blks_hit) AS block_reads_cache FROM pg_stat_database;"
 	res, err := s.db.QueryReturnColumnDict(cmd)
-	disk := 0
-	cache := 0
+	disk := int64(0)
+	cache := int64(0)
 	if err != nil {
-		return err
+		s.db.Logger.Println(err)
+		return
 	}
 	if len(res["block_reads_disk"]) == 0 {
 		s.db.Logger.Println("cannot get block_reads_disk")
 	} else {
-		disk, err := strconv.ParseInt(res["block_reads_disk"][0], 10, 64)
+		disk, err = strconv.ParseInt(res["block_reads_disk"][0], 10, 64)
 		if err != nil {
 			s.db.Logger.Println(err)
 		}
@@ -234,61 +268,76 @@ func (s *PostgresStat) getCacheInfo() error {
 	if len(res["block_reads_cache"]) == 0 {
 		s.db.Logger.Println("cannot get block_reads_cache")
 	} else {
-		cache, err := strconv.ParseInt(res["block_reads_cache"][0], 10, 64)
+		cache, err = strconv.ParseInt(res["block_reads_cache"][0], 10, 64)
 		if err != nil {
 			s.db.Logger.Println(err)
 		}
-		s.Metrics.BlockReadsDisk.Set(uint64(cache))
+		s.Metrics.BlockReadsCache.Set(uint64(cache))
 	}
-	if disk != 0 && cache != 0 {
+	if int64(disk) != int64(0) && int64(cache) != int64(0) {
 		pct := (float64(cache) / float64(cache+disk)) * 100.0
 		s.Metrics.CacheHitPct.Set(float64(pct))
 	}
-	return err
+	if err != nil {
+		s.db.Logger.Println(err)
+	}
 }
 
-func (s *PostgresStat) getCommitRatio() error {
+//get commit ratio
+func (s *PostgresStat) getCommitRatio() {
 	cmd := `
-SELECT AVG(ROUND((100.0*sd.xact_commit)/(sd.xact_commit+sd.xact_rollback), 2)) AS commit_ratio
-  FROM pg_stat_database sd
-  JOIN pg_database d ON (d.oid=sd.datid)
-  JOIN pg_user u ON (u.usesysid=d.datdba)
- WHERE sd.xact_commit+sd.xact_rollback != 0;`
+        SELECT AVG(ROUND((100.0*sd.xact_commit)/(sd.xact_commit+sd.xact_rollback), 2)) AS commit_ratio
+          FROM pg_stat_database sd
+          JOIN pg_database d ON (d.oid=sd.datid)
+          JOIN pg_user u ON (u.usesysid=d.datdba)
+         WHERE sd.xact_commit+sd.xact_rollback != 0;`
 	res, err := s.db.QueryReturnColumnDict(cmd)
 	if err != nil {
-		return err
+		s.db.Logger.Println(err)
+		return
 	}
-	v, ok := res["tps"]
+	v, ok := res["commit_ratio"]
 	if !ok || len(v) == 0 {
-		return errors.New("Can't get commit ratio")
+		s.db.Logger.Println(errors.New("Can't get commit ratio"))
+		return
 	}
 	val, err := strconv.ParseFloat(v[0], 64)
 	s.Metrics.CommitRatio.Set(val)
-	return err
+	if err != nil {
+		s.db.Logger.Println(err)
+	}
 }
 
-func (s *PostgresStat) getWalKeepSegments() error {
+//get wal keep segments
+func (s *PostgresStat) getWalKeepSegments() {
 	res, err := s.db.QueryReturnColumnDict("SELECT setting FROM pg_settings WHERE name = 'wal_keep_segments';")
 	if err != nil {
-		return err
+		s.db.Logger.Println(err)
+		return
 	}
 	v, ok := res["setting"]
 	if !ok || len(v) == 0 {
-		return errors.New("Can't get WalKeepSegments")
+		s.db.Logger.Println(errors.New("Can't get WalKeepSegments"))
+		return
 	}
 	val, err := strconv.ParseFloat(v[0], 64)
 	s.Metrics.WalKeepSegments.Set(float64(val))
-	return err
+	if err != nil {
+		s.db.Logger.Println(err)
+	}
 }
 
-func (s *PostgresStat) getSessions() error {
+//get session info
+func (s *PostgresStat) getSessions() {
 	res, err := s.db.QueryReturnColumnDict("SELECT setting FROM pg_settings WHERE name = 'max_connections';")
 	if err != nil {
-		return err
+		s.db.Logger.Println(err)
+		return
 	}
 	v, ok := res["setting"]
 	if !ok || len(v) == 0 {
-		return errors.New("Can't get session max")
+		s.db.Logger.Println(errors.New("Can't get session max"))
+		return
 	}
 	sessMax, err := strconv.ParseInt(v[0], 10, 64)
 	if err != nil {
@@ -297,14 +346,15 @@ func (s *PostgresStat) getSessions() error {
 	s.Metrics.SessionMax.Set(float64(sessMax))
 
 	cmd := fmt.Sprintf(`
-SELECT (SELECT COUNT(*) FROM pg_stat_activity 
-         WHERE %s = '%s') AS idle,
-       (SELECT COUNT(*) FROM pg_stat_activity 
-         WHERE %s != '%s') AS active;`, s.idleCol, s.idleStr, s.idleCol, s.idleStr)
+        SELECT (SELECT COUNT(*) FROM pg_stat_activity 
+                 WHERE %s = '%s') AS idle,
+               (SELECT COUNT(*) FROM pg_stat_activity 
+                 WHERE %s != '%s') AS active;`, s.idleCol, s.idleStr, s.idleCol, s.idleStr)
 
 	res, err = s.db.QueryReturnColumnDict(cmd)
 	if err != nil {
-		return err
+		s.db.Logger.Println(err)
+		return
 	}
 	idle := int64(0)
 	v, ok = res["idle"]
@@ -326,25 +376,28 @@ SELECT (SELECT COUNT(*) FROM pg_stat_activity
 	s.Metrics.SessionCurrentTotal.Set(total)
 	s.Metrics.SessionBusyPct.Set((float64(active) / total) * 100)
 	s.Metrics.ConnMaxPct.Set(float64(total/float64(sessMax)) * 100.0)
-	return nil
+	return
 }
 
-func (s *PostgresStat) getOldest() error {
+//get oldest transaction info
+func (s *PostgresStat) getOldest() {
 	info := map[string]*metrics.Gauge{"xact_start": s.Metrics.OldestTrxS, "query_start": s.Metrics.OldestQueryS}
 	for col, metric := range info {
 		cmd := fmt.Sprintf(`
-SELECT EXTRACT(epoch FROM NOW()) - EXTRACT(epoch FROM %s) AS oldest
-  FROM pg_stat_activity 
- WHERE %s != '%s'
-   AND UPPER(%s) NOT LIKE '%%VACUUM%%'
- ORDER BY 1 DESC LIMIT 1;`, col, s.idleCol, s.idleStr, s.queryCol)
+        SELECT EXTRACT(epoch FROM NOW()) - EXTRACT(epoch FROM %s) AS oldest
+          FROM pg_stat_activity 
+         WHERE %s != '%s'
+           AND UPPER(%s) NOT LIKE '%%VACUUM%%'
+         ORDER BY 1 DESC LIMIT 1;`, col, s.idleCol, s.idleStr, s.queryCol)
 		res, err := s.db.QueryReturnColumnDict(cmd)
 		if err != nil {
-			return err
+			s.db.Logger.Println(err)
+			return
 		}
 		v, ok := res["oldest"]
 		if !ok || len(v) == 0 {
-			return errors.New("cant get oldest")
+			// s.db.Logger.Println(err)
+			continue
 		}
 		val, err := strconv.ParseFloat(v[0], 64)
 		if err != nil {
@@ -352,45 +405,54 @@ SELECT EXTRACT(epoch FROM NOW()) - EXTRACT(epoch FROM %s) AS oldest
 		}
 		metric.Set(val)
 	}
-	return nil
+	return
 }
 
-func (s *PostgresStat) getNumLongEntries() error {
+//get long active running queries
+func (s *PostgresStat) getNumLongEntries() {
 	threshold := "30"
-	cmd := fmt.Sprintf(`SELECT * FROM pg_stat_activity 
- WHERE EXTRACT(epoch FROM NOW()) - EXTRACT(epoch FROM query_start) > %s
-   AND %s != '%s';`, threshold, s.idleCol, s.idleStr)
+	cmd := fmt.Sprintf(`
+        SELECT * FROM pg_stat_activity 
+         WHERE EXTRACT(epoch FROM NOW()) - EXTRACT(epoch FROM query_start) > %s
+           AND %s != '%s';`, threshold, s.idleCol, s.idleStr)
 	res, err := s.db.QueryReturnColumnDict(cmd)
 	if err != nil {
-		return err
+		s.db.Logger.Println(err)
+		return
+	}
+	if len(res) == 0 {
+		s.db.Logger.Println(errors.New("can't get num long entries"))
+		return
 	}
 	for _, col := range res {
 		s.Metrics.ActiveLongRunQueries.Set(float64(len(col)))
-		return nil
+		return
 	}
-	return nil
+
 }
 
-func (s *PostgresStat) getLocks() error {
+//get count on each type of lock held
+func (s *PostgresStat) getLocks() {
 	cmd := fmt.Sprintf(`
-SELECT bl.pid                 AS blocked_pid,
-       a.usename              AS blocked_user,
-       ka.%s       AS blocking_statement,
-       NOW() - ka.query_start AS blocking_duration,
-       kl.pid                 AS blocking_pid,
-       ka.usename             AS blocking_user,
-       a.%s        AS blocked_statement,
-       NOW() - a.query_start  AS blocked_duration
-  FROM pg_catalog.pg_locks bl
-  JOIN pg_catalog.pg_stat_activity a
-    ON a.%s = bl.pid
-  JOIN pg_catalog.pg_locks kl 
-    ON kl.transactionid = bl.transactionid AND kl.pid != bl.pid
-  JOIN pg_catalog.pg_stat_activity ka ON ka.%s = kl.pid
- WHERE NOT bl.granted;`, s.queryCol, s.queryCol, s.pidCol, s.pidCol)
+        SELECT bl.pid                 AS blocked_pid,
+               a.usename              AS blocked_user,
+               ka.%s       AS blocking_statement,
+               NOW() - ka.query_start AS blocking_duration,
+               kl.pid                 AS blocking_pid,
+               ka.usename             AS blocking_user,
+               a.%s        AS blocked_statement,
+               NOW() - a.query_start  AS blocked_duration
+          FROM pg_catalog.pg_locks bl
+          JOIN pg_catalog.pg_stat_activity a
+            ON a.%s = bl.pid
+          JOIN pg_catalog.pg_locks kl 
+            ON kl.transactionid = bl.transactionid AND kl.pid != bl.pid
+          JOIN pg_catalog.pg_stat_activity ka ON ka.%s = kl.pid
+         WHERE NOT bl.granted;`, s.queryCol, s.queryCol, s.pidCol, s.pidCol)
 	res, err := s.db.QueryReturnColumnDict(cmd)
 	if err != nil {
-		return err
+		s.db.Logger.Println(err)
+		return
 	}
 	for _, col := range res {
 		s.Metrics.LockWaiters.Set(float64(len(col)))
@@ -399,20 +461,25 @@ SELECT bl.pid                 AS blocked_pid,
 	cmd = "SELECT mode, COUNT(*) AS count FROM pg_locks WHERE granted GROUP BY 1;"
 	res, err = s.db.QueryMapFirstColumnToRow(cmd)
 	for mode, locks := range res {
+		if len(locks) == 0 {
+			continue
+		}
 		lock, _ := strconv.ParseInt(locks[0], 10, 64)
 		s.checkMode(mode)
 		s.Modes[mode].Locks.Set(float64(lock))
 	}
-	return nil
+
 }
 
-func (s *PostgresStat) getVacuumsInProgress() error {
+//get vacuum info
+func (s *PostgresStat) getVacuumsInProgress() {
 	cmd := fmt.Sprintf(`
-SELECT * FROM pg_stat_activity
- WHERE UPPER(%s) LIKE '%%VACUUM%%';`, s.queryCol)
+        SELECT %s FROM pg_stat_activity
+         WHERE UPPER(%s) LIKE '%%VACUUM%%';`, s.queryCol, s.queryCol)
 	res, err := s.db.QueryReturnColumnDict(cmd)
 	if err != nil {
-		return err
+		s.db.Logger.Println(err)
+		return
 	}
 	auto := 0
 	manual := 0
@@ -433,19 +500,20 @@ SELECT * FROM pg_stat_activity
 	}
 	s.Metrics.VacuumsAutoRunning.Set(float64(auto))
 	s.Metrics.VacuumsManualRunning.Set(float64(manual))
-	return nil
 }
 
-func (s *PostgresStat) getMainProcessInfo() error {
+//get process info
+func (s *PostgresStat) getMainProcessInfo() {
 	out, err := exec.Command("ps", "aux").Output()
 	if err != nil {
-		return err
+		s.db.Logger.Println(err)
+		return
 	}
 	blob := string(out)
 	lines := strings.Split(blob, "\n")
 	for _, line := range lines {
-		line = strings.Trim(line, " ")
-		words := strings.Split(line, " ")
+		line = strings.TrimSpace(line)
+		words := strings.Fields(line)
 
 		if len(words) < 10 {
 			continue
@@ -456,8 +524,12 @@ func (s *PostgresStat) getMainProcessInfo() error {
 			info := make([]string, 10)
 			//mapping for info: 0-user, 1-pid, 2-cpu, 3-mem, 4-vsz, 5-rss, 6-tty, 7-stat, 8-start, 9-time, 10-cmd
 			for i, word := range words {
+				if i == 10 {
+					break
+				}
 				info[i] = word
 			}
+
 			cpu, _ := strconv.ParseFloat(info[2], 64) //TODO: correctly handle these errors
 			mem, _ := strconv.ParseFloat(info[3], 64)
 			vsz, _ := strconv.ParseFloat(info[4], 64)
@@ -468,11 +540,10 @@ func (s *PostgresStat) getMainProcessInfo() error {
 			s.Metrics.RSS.Set(rss)
 		}
 	}
-	return nil
 }
 
 //TODO: double check this before testing
-func (s *PostgresStat) getWriteability() error {
+func (s *PostgresStat) getWriteability() {
 	_, err := s.db.QueryReturnColumnDict("CREATE SCHEMA postgres_health;")
 	if err != nil {
 		s.Metrics.Writable.Set(float64(0))
@@ -494,41 +565,44 @@ func (s *PostgresStat) getWriteability() error {
 		s.Metrics.Writable.Set(float64(0))
 	}
 	s.Metrics.Writable.Set(float64(1))
-	return nil
 }
 
-func (s *PostgresStat) getSizes() error {
-	cmd := fmt.Sprintf("ls -l %s/pg_xlog/ | egrep -v 'archive_status|history'", s.PGDATA)
-	args := strings.Split(cmd, " ")
-	out, err := exec.Command("ls", args[1:]...).Output() //TODO: fix this
+//get size of tables and databases and binlogs
+func (s *PostgresStat) getSizes() {
+	//get binlog sizes
+	out, err := exec.Command("ls", "-l", "/data/pgsql/pg_xlog/").Output()
 	if err != nil {
-		return err
+		s.db.Logger.Println(err)
+		return
 	}
 	blob := string(out)
 	count := 0
-	total := 0
+	total := float64(0)
 	for _, line := range strings.Split(blob, "\n") {
 		cols := strings.Split(line, " ")
 		if len(cols) < 5 {
 			continue
 		}
 		count += 1
-		tmp, _ := strconv.Atoi(cols[4])
+		tmp, _ := strconv.ParseFloat(cols[4], 64)
 		total += tmp
 	}
 	s.Metrics.BinlogFiles.Set(float64(count))
 	s.Metrics.DBSizeBinlogs.Set(float64(total))
-	cmd = `
+
+	//get database sizes
+	cmd := `
 	SELECT datname AS dbname, PG_DATABASE_SIZE(datname) AS size
 	  FROM pg_database;`
 	//method similar here to the mysql one
 	res, err := s.db.QueryMapFirstColumnToRow(cmd)
 	if err != nil {
-		return err
+		s.db.Logger.Println(err)
+		return
 	}
 	for key, value := range res {
 		//key being the name of the db, value its size in bytes
-		dbname := string(key)
+		dbname := strings.TrimSpace(string(key))
 		size, err := strconv.ParseInt(string(value[0]), 10, 64)
 		if err != nil {
 			s.db.Logger.Println(err)
@@ -538,18 +612,20 @@ func (s *PostgresStat) getSizes() error {
 			s.DBs[dbname].SizeBytes.Set(float64(size))
 		}
 	}
+
+	//get table sizes
 	for dbname, _ := range res {
 		newDsn := make(map[string]string)
-		for k, v := range s.dsn {
+		for k, v := range s.db.Dsn {
 			newDsn[k] = v
 		}
 		newDsn["dbname"] = dbname
 		newDB, err := postgrestools.New(newDsn)
 		if err != nil {
-			s.db.Logger.Println(err)
+			s.db.Logger.Println("Cannot connect to database: " + dbname)
 			continue
 		}
-		cmd = `
+		cmd = fmt.Sprintf(`
           SELECT nspname || '.' || relname AS relation,
                  PG_TOTAL_RELATION_SIZE(C.oid) AS total_size
             FROM pg_class C
@@ -557,7 +633,7 @@ func (s *PostgresStat) getSizes() error {
            WHERE nspname NOT IN ('pg_catalog', 'information_schema')
              AND C.relkind <> 'i'
              AND nspname !~ '^pg_toast'
-           ORDER BY pg_total_relation_size(C.oid) DESC;`
+           ORDER BY pg_total_relation_size(C.oid) DESC;`, dbname)
 		res, err := newDB.QueryMapFirstColumnToRow(cmd)
 		if err != nil {
 			s.db.Logger.Println(err)
@@ -571,13 +647,14 @@ func (s *PostgresStat) getSizes() error {
 		}
 		newDB.Close()
 	}
-	return nil
 }
 
-func (s *PostgresStat) getBackups() error {
+//get count of backups
+func (s *PostgresStat) getBackups() {
 	out, err := exec.Command("ps", "aux").Output()
 	if err != nil {
-		return err
+		s.db.Logger.Println(err)
+		return
 	}
 	blob := string(out)
 	lines := strings.Split(blob, "\n")
@@ -593,27 +670,35 @@ func (s *PostgresStat) getBackups() error {
 		}
 	}
 	s.Metrics.BackupsRunning.Set(float64(backupProcs))
-	return nil
 }
 
-func (s *PostgresStat) getSecondsBehindMaster() error {
+//get seconds
+func (s *PostgresStat) getSecondsBehindMaster() {
 	recoveryConfFile := s.PGDATA + "/recovery.conf"
 	recoveryDoneFile := s.PGDATA + "/recovery.done"
 	cmd := `
-SELECT EXTRACT(epoch FROM NOW()) 
-     - EXTRACT(epoch FROM pg_last_xact_replay_timestamp()) AS seconds;`
+        SELECT EXTRACT(epoch FROM NOW()) 
+             - EXTRACT(epoch FROM pg_last_xact_replay_timestamp()) AS seconds;`
 	res, err := s.db.QueryReturnColumnDict(cmd)
 	if err != nil {
-		return err
+		s.db.Logger.Println(err)
+		return
 	}
 	v, ok := res["seconds"]
 	if !ok || len(v) == 0 {
-		return errors.New("Unable to get seconds behind master")
+		s.db.Logger.Println(errors.New("Unable to get seconds behind master"))
+		return
+	}
+	if res["seconds"][0] == "" {
+		s.Metrics.SecondsBehindMaster.Set(float64(0)) // or -1?
+		return
 	}
 	seconds, err := strconv.ParseInt(res["seconds"][0], 10, 64)
 	if err != nil {
-		return err
+		s.db.Logger.Println(err)
+		return
 	}
+	s.db.Logger.Println(seconds)
 	s.Metrics.SecondsBehindMaster.Set(float64(seconds))
 	_, confErr := os.Stat(recoveryConfFile)
 	if confErr == nil {
@@ -623,59 +708,59 @@ SELECT EXTRACT(epoch FROM NOW())
 	if doneErr == nil && os.IsNotExist(confErr) {
 		s.Metrics.SecondsBehindMaster.Set(float64(-1))
 	}
-	return nil
 }
 
-func (s *PostgresStat) getSlaveDelayBytes() error {
+//get bytes slave is behind master
+func (s *PostgresStat) getSlaveDelayBytes() {
 	cmd := `
-SELECT pg_current_xlog_location(), write_location, client_hostname
-  FROM pg_stat_replication;`
+        SELECT pg_current_xlog_location(), write_location, client_hostname
+          FROM pg_stat_replication;`
 	res, err := s.db.QueryReturnColumnDict(cmd)
 	if err != nil {
-		return err
+		s.db.Logger.Println(err)
+		return
 	}
 	s.Metrics.SlavesConnectedToMe.Set(float64(len(res["client_hostname"])))
-	for _, val := range res["pg_current_xlog_location()"] {
+	for _, val := range res["pg_current_xlog_location"] {
 		str := strings.Split(val, "/")
 		if len(str) < 2 {
-			return errors.New("Can't get slave delay bytes")
-		} //This part can probably be cleaned up a bit when the exact format is figured out
+			s.db.Logger.Println(errors.New("Can't get slave delay bytes"))
+			return
+		}
 		var masterFile, masterPos, slaveFile, slavePos int64
 		masterFile, err = strconv.ParseInt(str[0], 16, 64)
-		if err != nil {
-			masterFile, _ = strconv.ParseInt(str[0], 0, 64)
+
+		masterPos, err = strconv.ParseInt(str[1], 16, 64)
+
+		str2 := strings.Split(res["write_location"][0], "/")
+		if len(str2) < 2 {
+			s.db.Logger.Println(errors.New("Can't get slave delay bytes"))
+			return
 		}
-		masterPos, _ = strconv.ParseInt(str[1], 16, 64)
-		if err != nil {
-			masterPos, _ = strconv.ParseInt(str[1], 0, 64)
-		}
-		str = strings.Split(res["write_location"][0], "/")
-		if len(str) < 2 {
-			return errors.New("Can't get slave delay bytes")
-		}
-		slaveFile, _ = strconv.ParseInt(str[0], 16, 64)
-		if err != nil {
-			slaveFile, _ = strconv.ParseInt(str[0], 0, 64)
-		}
-		slavePos, _ = strconv.ParseInt(str[1], 16, 64)
-		if err != nil {
-			slavePos, _ = strconv.ParseInt(str[1], 0, 64)
-		}
+		slaveFile, err = strconv.ParseInt(str2[0], 16, 64)
+
+		slavePos, err = strconv.ParseInt(str2[1], 16, 64)
+
 		segmentSize, _ := strconv.ParseInt("0xFFFFFFFF", 0, 64)
+
 		r := ((masterFile * segmentSize) + masterPos) - ((slaveFile * segmentSize) + slavePos)
 		s.Metrics.SlaveBytesBehindMe.Set(float64(r))
 	}
-	return nil
+	if err != nil {
+		s.db.Logger.Println(err)
+	}
 }
 
-func (s *PostgresStat) getSecurity() error {
+//get count of users without passwords
+func (s *PostgresStat) getSecurity() {
 	cmd := "SELECT usename FROM pg_shadow WHERE passwd IS NULL;"
 	res, err := s.db.QueryReturnColumnDict(cmd)
 	if err != nil {
-		return err
+		s.db.Logger.Println(err)
+		return
 	}
 	if len(res) > 0 {
 		s.Metrics.UnsecureUsers.Set(float64(len(res)))
 	}
-	return nil
+
 }
