@@ -513,6 +513,7 @@ func (s *PostgresStat) getLocks() {
 func (s *PostgresStat) getVacuumsInProgress() {
 	cmd := fmt.Sprintf(vacuumsQuery, s.queryCol, s.queryCol)
 	res, err := s.db.QueryReturnColumnDict(cmd)
+	s.db.Log(res)
 	if err != nil {
 		s.db.Log(err)
 		return
@@ -779,7 +780,7 @@ func (s *PostgresStat) getSecurity() {
 		return
 	}
 	if len(res) > 0 {
-		s.Metrics.UnsecureUsers.Set(float64(len(res)))
+		s.Metrics.UnsecureUsers.Set(float64(len(res["usename"])))
 	}
 
 }

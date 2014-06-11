@@ -30,6 +30,10 @@ var (
 	// can switch between metrics.Gauge and metrics.Counter
 	// and between float64 and uint64 easily
 	expectedValues = map[interface{}]interface{}{}
+
+	//  expecting lots of log messages becaues of tests
+	//  redirect to this file
+	logFile, _ = os.OpenFile("./test.log", os.O_WRONLY|os.O_CREATE|os.O_SYNC, 0644)
 )
 
 //functions that behave like mysqltools but we can make it return whatever
@@ -54,7 +58,6 @@ func (s *testPostgresDB) Close() {
 }
 
 func initPostgresStat() *PostgresStat {
-	logFile, _ := os.OpenFile("./test.log", os.O_WRONLY|os.O_CREATE|os.O_SYNC, 0644)
 	syscall.Dup2(int(logFile.Fd()), 2)
 
 	s := new(PostgresStat)
@@ -257,6 +260,257 @@ func TestVersion3(t *testing.T) {
 		s.queryCol:        "query",
 		s.idleCol:         "state",
 		s.idleStr:         "idle",
+	}
+	err := checkResults()
+	if err != "" {
+		t.Fatalf(err)
+	}
+}
+
+func TestVacuums1(t *testing.T) {
+	//initialize PostgresStat
+	s := initPostgresStat()
+	//set desired test output
+	testquerycol = map[string]map[string][]string{
+		fmt.Sprintf(vacuumsQuery, s.queryCol, s.queryCol): map[string][]string{
+			s.queryCol: []string{
+				"autovacuum: ", "VACUUM", "ANALYZE", "autovacuum:", "VACUUM",
+			},
+		},
+	}
+	s.Collect()
+	time.Sleep(time.Millisecond * 1000 * 1)
+	expectedValues = map[interface{}]interface{}{
+		s.Metrics.VacuumsAutoRunning:   float64(2),
+		s.Metrics.VacuumsManualRunning: float64(3),
+	}
+	err := checkResults()
+	if err != "" {
+		t.Fatalf(err)
+	}
+}
+
+func TestVacuums2(t *testing.T) {
+	//initialize PostgresStat
+	s := initPostgresStat()
+	//set desired test output
+	testquerycol = map[string]map[string][]string{
+		fmt.Sprintf(vacuumsQuery, s.queryCol, s.queryCol): map[string][]string{
+			s.queryCol: []string{},
+		},
+	}
+	s.Collect()
+	time.Sleep(time.Millisecond * 1000 * 1)
+	expectedValues = map[interface{}]interface{}{
+		s.Metrics.VacuumsAutoRunning:   float64(0),
+		s.Metrics.VacuumsManualRunning: float64(0),
+	}
+	err := checkResults()
+	if err != "" {
+		t.Fatalf(err)
+	}
+}
+
+func TestVacuums3(t *testing.T) {
+	//initialize PostgresStat
+	s := initPostgresStat()
+	//set desired test output
+	testquerycol = map[string]map[string][]string{
+		fmt.Sprintf(vacuumsQuery, s.queryCol, s.queryCol): map[string][]string{
+			s.queryCol: []string{
+				"autovacuum:", "autovacuum:", "autovacuum:", "autovacuum:",
+			},
+		},
+	}
+	s.Collect()
+	time.Sleep(time.Millisecond * 1000 * 1)
+	expectedValues = map[interface{}]interface{}{
+		s.Metrics.VacuumsAutoRunning:   float64(4),
+		s.Metrics.VacuumsManualRunning: float64(0),
+	}
+	err := checkResults()
+	if err != "" {
+		t.Fatalf(err)
+	}
+}
+
+func TestVacuums4(t *testing.T) {
+	//initialize PostgresStat
+	s := initPostgresStat()
+	//set desired test output
+	testquerycol = map[string]map[string][]string{
+		fmt.Sprintf(vacuumsQuery, s.queryCol, s.queryCol): map[string][]string{
+			s.queryCol: []string{
+				"blah blah blah ", "VACUUM", "ANALYZE", "ANALYZE", "VACUUM",
+			},
+		},
+	}
+	s.Collect()
+	time.Sleep(time.Millisecond * 1000 * 1)
+	expectedValues = map[interface{}]interface{}{
+		s.Metrics.VacuumsAutoRunning:   float64(0),
+		s.Metrics.VacuumsManualRunning: float64(5),
+	}
+	err := checkResults()
+	if err != "" {
+		t.Fatalf(err)
+	}
+}
+
+func TestVacuums5(t *testing.T) {
+	//initialize PostgresStat
+	s := initPostgresStat()
+	//set desired test output
+	testquerycol = map[string]map[string][]string{
+		fmt.Sprintf(vacuumsQuery, s.queryCol, s.queryCol): map[string][]string{
+			s.queryCol: []string{
+				"", "", "", "",
+			},
+		},
+	}
+	s.Collect()
+	time.Sleep(time.Millisecond * 1000 * 1)
+	expectedValues = map[interface{}]interface{}{
+		s.Metrics.VacuumsAutoRunning:   float64(0),
+		s.Metrics.VacuumsManualRunning: float64(0),
+	}
+	err := checkResults()
+	if err != "" {
+		t.Fatalf(err)
+	}
+}
+
+func TestSecondsBehindMaster1(t *testing.T) {
+	//initialize PostgresStat
+	s := initPostgresStat()
+	testquerycol = map[string]map[string][]string{
+		secondsBehindMasterQuery: map[string][]string{
+			"seconds": []string{"15453"},
+		},
+	}
+	s.Collect()
+	time.Sleep(time.Millisecond * 1000 * 1)
+	expectedValues = map[interface{}]interface{}{
+		s.Metrics.SecondsBehindMaster: float64(15453),
+	}
+	err := checkResults()
+	if err != "" {
+		t.Fatalf(err)
+	}
+}
+
+func TestSecondsBehindMaster2(t *testing.T) {
+	//initialize PostgresStat
+	s := initPostgresStat()
+	testquerycol = map[string]map[string][]string{
+		secondsBehindMasterQuery: map[string][]string{
+			"seconds": []string{""},
+		},
+	}
+	s.Collect()
+	time.Sleep(time.Millisecond * 1000 * 1)
+	expectedValues = map[interface{}]interface{}{
+		s.Metrics.SecondsBehindMaster: float64(0),
+	}
+	err := checkResults()
+	if err != "" {
+		t.Fatalf(err)
+	}
+}
+
+func TestSecondsBehindMaster3(t *testing.T) {
+	//initialize PostgresStat
+	s := initPostgresStat()
+	testquerycol = map[string]map[string][]string{
+		secondsBehindMasterQuery: map[string][]string{
+			"seconds": []string{"0"},
+		},
+	}
+	s.Collect()
+	time.Sleep(time.Millisecond * 1000 * 1)
+	expectedValues = map[interface{}]interface{}{
+		s.Metrics.SecondsBehindMaster: float64(0),
+	}
+	err := checkResults()
+	if err != "" {
+		t.Fatalf(err)
+	}
+}
+
+func TestSlaveDelayBytes1(t *testing.T) {
+	s := initPostgresStat()
+	testquerycol = map[string]map[string][]string{
+		delayBytesQuery: map[string][]string{
+			"client_hostname":          []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"},
+			"pg_current_xlog_location": []string{"0/0"},
+			"write_location":           []string{"0/0"},
+		},
+	}
+	s.Collect()
+	time.Sleep(time.Millisecond * 1000 * 1)
+	expectedValues = map[interface{}]interface{}{
+		s.Metrics.SlaveBytesBehindMe:  float64(0),
+		s.Metrics.SlavesConnectedToMe: float64(10),
+	}
+	err := checkResults()
+	if err != "" {
+		t.Fatalf(err)
+	}
+}
+
+func TestSlaveDelayBytes2(t *testing.T) {
+	s := initPostgresStat()
+	testquerycol = map[string]map[string][]string{
+		delayBytesQuery: map[string][]string{
+			"client_hostname":          []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"},
+			"pg_current_xlog_location": []string{"0/ff"},
+			"write_location":           []string{"0/0"},
+		},
+	}
+	s.Collect()
+	time.Sleep(time.Millisecond * 1000 * 1)
+	expectedValues = map[interface{}]interface{}{
+		s.Metrics.SlaveBytesBehindMe:  float64(255),
+		s.Metrics.SlavesConnectedToMe: float64(10),
+	}
+	err := checkResults()
+	if err != "" {
+		t.Fatalf(err)
+	}
+}
+
+func TestSlaveDelayBytes3(t *testing.T) {
+	s := initPostgresStat()
+	testquerycol = map[string]map[string][]string{
+		delayBytesQuery: map[string][]string{
+			"client_hostname":          []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"},
+			"pg_current_xlog_location": []string{"c8/96"},
+			"write_location":           []string{"64/32"},
+		},
+	}
+	s.Collect()
+	time.Sleep(time.Millisecond * 1000 * 1)
+	expectedValues = map[interface{}]interface{}{
+		s.Metrics.SlaveBytesBehindMe:  float64(429496729600),
+		s.Metrics.SlavesConnectedToMe: float64(10),
+	}
+	err := checkResults()
+	if err != "" {
+		t.Fatalf(err)
+	}
+}
+
+func TestSecurity1(t *testing.T) {
+	s := initPostgresStat()
+	testquerycol = map[string]map[string][]string{
+		securityQuery: map[string][]string{
+			"usename": []string{"1", "2", "3", "4", "5"},
+		},
+	}
+	s.Collect()
+	time.Sleep(time.Millisecond * 1000 * 1)
+	expectedValues = map[interface{}]interface{}{
+		s.Metrics.UnsecureUsers: float64(5),
 	}
 	err := checkResults()
 	if err != "" {
