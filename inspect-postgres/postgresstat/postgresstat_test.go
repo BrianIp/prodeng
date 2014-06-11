@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime"
 	"strconv"
+	"syscall"
 	"testing"
 	"time"
 
@@ -12,11 +14,7 @@ import (
 )
 
 type testPostgresDB struct {
-	Logger   *log.Logger
-	pidCol   string
-	queryCol string
-	idleCol  string
-	idleStr  string
+	Logger *log.Logger
 }
 
 var (
@@ -44,6 +42,10 @@ func (s *testPostgresDB) QueryMapFirstColumnToRow(query string) (map[string][]st
 }
 
 func (s *testPostgresDB) Log(in interface{}) {
+	_, f, line, ok := runtime.Caller(1)
+	if ok {
+		s.Logger.Println("Log from: " + f + " line: " + strconv.Itoa(line))
+	}
 	s.Logger.Println(in)
 }
 
@@ -52,11 +54,18 @@ func (s *testPostgresDB) Close() {
 }
 
 func initPostgresStat() *PostgresStat {
+	logFile, _ := os.OpenFile("./test.log", os.O_WRONLY|os.O_CREATE|os.O_SYNC, 0644)
+	syscall.Dup2(int(logFile.Fd()), 2)
+
 	s := new(PostgresStat)
 	s.db = &testPostgresDB{
-		Logger: log.New(os.Stderr, "TESTING LOG: ", log.Lshortfile),
+		Logger: log.New(os.Stderr, "TESTING LOG: ", 0),
 	}
-	s.Metrics = PostgresStatMetricsNew(metrics.NewMetricContext("system"),
+	s.PGDATA = "/data/pgsql"
+	s.m = metrics.NewMetricContext("system")
+	s.Modes = make(map[string]*ModeMetrics)
+	s.DBs = make(map[string]*DBMetrics)
+	s.Metrics = PostgresStatMetricsNew(s.m,
 		time.Millisecond*time.Duration(1)*1000)
 	s.pidCol = "procpid"
 	s.queryCol = "current_query"
@@ -89,13 +98,20 @@ func checkResults() string {
 					strconv.FormatFloat(float64(m.Get()), 'f', 5, 64) + " but wanted " +
 					strconv.FormatFloat(float64(val), 'f', 5, 64))
 			}
+		case string:
+			val, ok := expected.(string)
+			if !ok {
+				return "unexpected type"
+			}
+			if m != val {
+				return ("unexpected value - got: " + m + " but wated " + val)
+			}
 		}
 	}
 	return ""
 }
 
 func TestBasic(t *testing.T) {
-	fmt.Println("Basic Test")
 	//initialize PostgresStat
 	s := initPostgresStat()
 	//set desired test output
@@ -141,7 +157,15 @@ func TestBasic(t *testing.T) {
 		locksQuery: map[string][]string{
 			"lock1": []string{"15213"},
 			"lock2": []string{"15322"},
-			"lock3": []strimg{"15396"},
+			"lock3": []string{"15396"},
+		},
+		fmt.Sprintf(vacuumsQuery, s.queryCol, s.queryCol): map[string][]string{
+			s.queryCol: []string{
+				"autovacuum: ", "VACUUM", "ANALYZE", "autovacuum:", "VACUUM",
+			},
+		},
+		secondsBehindMasterQuery: map[string][]string{
+			"seconds": []string{"15424"},
 		},
 	}
 	s.Collect()
@@ -150,8 +174,8 @@ func TestBasic(t *testing.T) {
 		s.Metrics.Uptime:               uint64(15110),
 		s.Metrics.Version:              float64(9.15),
 		s.Metrics.TPS:                  uint64(15122),
-		s.Metrics.BlockReadsDisk:       uint64(1),
-		s.Metrics.BlockReadsCache:      uint64(2),
+		s.Metrics.BlockReadsDisk:       uint64(4),
+		s.Metrics.BlockReadsCache:      uint64(6),
 		s.Metrics.CacheHitPct:          float64(60),
 		s.Metrics.CommitRatio:          float64(0.5),
 		s.Metrics.WalKeepSegments:      float64(15.210),
@@ -166,12 +190,76 @@ func TestBasic(t *testing.T) {
 		s.Modes["lock1"].Locks:         float64(15213),
 		s.Modes["lock2"].Locks:         float64(15322),
 		s.Modes["lock3"].Locks:         float64(15396),
-		//TODO: get vacuums in progress
-
+		s.Metrics.VacuumsAutoRunning:   float64(2),
+		s.Metrics.VacuumsManualRunning: float64(3),
+		s.Metrics.SecondsBehindMaster:  float64(15424),
 	}
 	err := checkResults()
 	if err != "" {
-		t.Error(err)
+		t.Fatalf(err)
 	}
-	fmt.Println("PASS")
+}
+
+func TestVersion1(t *testing.T) {
+	//initialize PostgresStat
+	s := initPostgresStat()
+	//set desired test output
+	testquerycol = map[string]map[string][]string{
+		versionQuery: map[string][]string{
+			"version": []string{"PostgreSQL 9.1.5 x86_64-linuc-gnu"},
+		},
+	}
+	s.Collect()
+	time.Sleep(time.Millisecond * 1000 * 1)
+	expectedValues = map[interface{}]interface{}{
+		s.Metrics.Version: float64(9.15),
+	}
+	err := checkResults()
+	if err != "" {
+		t.Fatalf(err)
+	}
+}
+
+func TestVersion2(t *testing.T) {
+	//initialize PostgresStat
+	s := initPostgresStat()
+	//set desired test output
+	testquerycol = map[string]map[string][]string{
+		versionQuery: map[string][]string{
+			"version": []string{"PostgreSQL 9.22.5 x86_64-linuc-gnu"},
+		},
+	}
+	s.Collect()
+	time.Sleep(time.Millisecond * 1000 * 1)
+	expectedValues = map[interface{}]interface{}{
+		s.Metrics.Version: float64(9.225),
+	}
+	err := checkResults()
+	if err != "" {
+		t.Fatalf(err)
+	}
+}
+
+func TestVersion3(t *testing.T) {
+	//initialize PostgresStat
+	s := initPostgresStat()
+	//set desired test output
+	testquerycol = map[string]map[string][]string{
+		versionQuery: map[string][]string{
+			"version": []string{"PostgreSQL 9.3.43 x86_64-linuc-gnu"},
+		},
+	}
+	s.Collect()
+	time.Sleep(time.Millisecond * 1000 * 1)
+	expectedValues = map[interface{}]interface{}{
+		s.Metrics.Version: float64(9.343),
+		s.pidCol:          "pid",
+		s.queryCol:        "query",
+		s.idleCol:         "state",
+		s.idleStr:         "idle",
+	}
+	err := checkResults()
+	if err != "" {
+		t.Fatalf(err)
+	}
 }

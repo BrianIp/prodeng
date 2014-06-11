@@ -151,6 +151,7 @@ const (
 	delayBytesQuery = `
         SELECT pg_current_xlog_location(), write_location, client_hostname
           FROM pg_stat_replication;`
+	securityQuery = "SELECT usename FROM pg_shadow WHERE passwd IS NULL;"
 )
 
 //Opens connection to postgres database and starts collector for metrics
@@ -720,7 +721,6 @@ func (s *PostgresStat) getSecondsBehindMaster() {
 		s.db.Log(err)
 		return
 	}
-	s.db.Log(seconds)
 	s.Metrics.SecondsBehindMaster.Set(float64(seconds))
 	_, confErr := os.Stat(recoveryConfFile)
 	if confErr == nil {
@@ -773,8 +773,7 @@ func (s *PostgresStat) getSlaveDelayBytes() {
 
 //get count of users without passwords
 func (s *PostgresStat) getSecurity() {
-	cmd := "SELECT usename FROM pg_shadow WHERE passwd IS NULL;"
-	res, err := s.db.QueryReturnColumnDict(cmd)
+	res, err := s.db.QueryReturnColumnDict(securityQuery)
 	if err != nil {
 		s.db.Log(err)
 		return
