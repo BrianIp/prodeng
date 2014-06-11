@@ -20,7 +20,7 @@ import (
 type MysqlStat struct {
 	Metrics *MysqlStatMetrics //collection of metrics
 	m       *metrics.MetricContext
-	db      *mysqltools.MysqlDB //mysql connection
+	db      mysqltools.MysqlDB //mysql connection
 }
 
 // metrics being collected about the server/database
@@ -142,6 +142,45 @@ type MysqlStatMetrics struct {
 	QueryResponseSec1000000_ *metrics.Counter
 }
 
+const (
+	slaveQuery  = "SHOW SLAVE STATUS;"
+	mutexQuery  = "SHOW ENGINE INNODB MUTEX;"
+	oldestQuery = `
+ SELECT time FROM information_schema.processlist
+  WHERE command NOT IN ('Sleep','Connect','Binlog Dump')
+  ORDER BY time DESC LIMIT 1;`
+	responseTimeQuery = "SELECT time, count FROM INFORMATION_SCHEMA.QUERY_RESPONSE_TIME;"
+	binlogQuery       = "SHOW MASTER LOGS;"
+	globalStatsQuery  = "SHOW GLOBAL STATUS;"
+	longQuery         = `
+    SELECT * FROM information_schema.processlist
+     WHERE command NOT IN ('Sleep', 'Connect', 'Binlog Dump')
+       AND time > 30;`
+	versionQuery     = "SELECT VERSION();"
+	binlogStatsQuery = "SHOW MASTER STATUS;"
+	stackedQuery     = `
+  SELECT COUNT(*) AS identical_queries_stacked, 
+         MAX(time) AS max_age, 
+         GROUP_CONCAT(id SEPARATOR ' ') AS thread_ids, 
+         info as query 
+    FROM information_schema.processlist 
+   WHERE user != 'system user'
+     AND user NOT LIKE 'repl%'
+     AND info IS NOT NULL
+   GROUP BY 4
+  HAVING COUNT(*) > 1
+     AND MAX(time) > 300
+   ORDER BY 2 DESC;`
+	sessionQuery1 = "SELECT @@GLOBAL.max_connections;"
+	sessionQuery2 = `
+    SELECT IF(command LIKE 'Sleep',1,0) +
+           IF(state LIKE '%master%' OR state LIKE '%slave%',1,0) AS sort_col,
+           processlist.*
+      FROM information_schema.processlist
+     ORDER BY 1, time DESC;`
+	innodbQuery = "SHOW GLOBAL VARIABLES LIKE 'innodb_log_file_size';"
+)
+
 //initializes mysqlstat
 // starts off collect
 func New(m *metrics.MetricContext, Step time.Duration, user, password, config string) (*MysqlStat, error) {
@@ -151,23 +190,17 @@ func New(m *metrics.MetricContext, Step time.Duration, user, password, config st
 	var err error
 	s.db, err = mysqltools.New(user, password, config)
 	if err != nil {
-		s.db.Logger.Println(err)
+		s.db.Log(err)
 		return nil, err
 	}
 	s.Metrics = MysqlStatMetricsNew(m, Step)
 
-	s.Collect(0)
+	s.Collect()
 
 	ticker := time.NewTicker(Step)
 	go func() {
-		i := 0
 		for _ = range ticker.C {
-
-			//pass in i to each collection function
-			//  some functions are expensive and so should only
-			//  be made once every few cycles
-			s.Collect(i)
-			i = (i + 1) % (5) //reset to 0 every 5 cycles
+			go s.Collect()
 		}
 	}()
 	return s, nil
@@ -180,66 +213,68 @@ func MysqlStatMetricsNew(m *metrics.MetricContext, Step time.Duration) *MysqlSta
 	return c
 }
 
-func (s *MysqlStat) Collect(i int) {
-	collections := []error{
-		s.getVersion(),
-		s.getSlaveStats(),
-		s.getGlobalStatus(),
-		s.getBinlogStats(),
-		s.getStackedQueries(),
-		s.getSessions(),
-		s.getInnodbStats(),
-		s.getNumLongRunQueries(),
-		s.getInnodbBufferpoolMutexWaits(i),
-		s.getQueryResponseTime(),
-		s.getBackups(),
-	}
-	for _, err := range collections {
-		if err != nil {
-			s.db.Logger.Println(err)
-		}
-	}
+//launches metrics collectors
+// sql.DB is safe for concurrent use by multiple goroutines
+// so launching each metric collector as its own goroutine is safe
+func (s *MysqlStat) Collect() {
+	go s.getVersion()
+	go s.getSlaveStats()
+	go s.getGlobalStatus()
+	go s.getBinlogStats()
+	go s.getStackedQueries()
+	go s.getSessions()
+	go s.getInnodbStats()
+	go s.getNumLongRunQueries()
+	go s.getQueryResponseTime()
+	go s.getBackups()
+	go s.getOldest()
+	go s.getBinlogFiles()
+	go s.getInnodbBufferpoolMutexWaits()
 }
 
 // get_slave_stats gets slave statistics
-func (s *MysqlStat) getSlaveStats() error {
-	res, err := s.db.QueryReturnColumnDict("SHOW SLAVE STATUS;")
+func (s *MysqlStat) getSlaveStats() {
+	res, err := s.db.QueryReturnColumnDict(slaveQuery)
 	if err != nil {
-		return err
+		s.db.Log(err)
+		return
 	}
 
 	if len(res["Seconds_Behind_Master"]) > 0 {
 		seconds_behind_master, err := strconv.ParseFloat(string(res["Seconds_Behind_Master"][0]), 64)
 		if err != nil {
-			s.db.Logger.Println(err)
+			s.db.Log(err)
 		}
 		s.Metrics.SlaveSecondsBehindMaster.Set(float64(seconds_behind_master))
 	}
 
 	relay_master_log_file, _ := res["Relay_Master_Log_File"]
 	if len(relay_master_log_file) > 0 {
-		slave_seqfile, err := strconv.ParseInt(strings.Split(string(relay_master_log_file[0]), ".")[1], 10, 64)
+		tmp := strings.Split(string(relay_master_log_file[0]), ".")
+		slave_seqfile, err := strconv.ParseInt(tmp[len(tmp)-1], 10, 64)
 		s.Metrics.SlaveSeqFile.Set(float64(slave_seqfile))
 		if err != nil {
-			s.db.Logger.Println(err)
+			s.db.Log(err)
 		}
 	}
 
 	if len(res["Exec_Master_Log_Pos"]) > 0 {
 		slave_position, err := strconv.ParseFloat(string(res["Exec_Master_Log_Pos"][0]), 64)
 		if err != nil {
-			return err
+			s.db.Log(err)
+			return
 		}
 		s.Metrics.SlavePosition.Set(uint64(slave_position))
 	}
-	return nil
+	return
 }
 
 //gets global statuses
-func (s *MysqlStat) getGlobalStatus() error {
-	res, err := s.db.QueryMapFirstColumnToRow("SHOW GLOBAL STATUS;")
+func (s *MysqlStat) getGlobalStatus() {
+	res, err := s.db.QueryMapFirstColumnToRow(globalStatsQuery)
 	if err != nil {
-		return err
+		s.db.Log(err)
+		return
 	}
 	vars := map[string]interface{}{
 		"Binlog_cache_disk_use":         s.Metrics.BinlogCacheDiskUse,
@@ -280,7 +315,7 @@ func (s *MysqlStat) getGlobalStatus() error {
 		if ok && len(v) > 0 {
 			val, err := strconv.ParseFloat(string(v[0]), 64)
 			if err != nil {
-				s.db.Logger.Println(err)
+				s.db.Log(err)
 			}
 			switch met := metric.(type) {
 			case *metrics.Counter:
@@ -290,18 +325,19 @@ func (s *MysqlStat) getGlobalStatus() error {
 			}
 		}
 	}
-	return nil
+	return
 }
 
-func (s *MysqlStat) getInnodbBufferpoolMutexWaits(i int) error {
-	//this collects less frequently as this operation can be expensive
-	if i != 0 {
-		return nil
-	}
-	res, err := s.db.QueryReturnColumnDict("SHOW ENGINE INNODB MUTEX;")
+//get mutex info
+func (s *MysqlStat) getInnodbBufferpoolMutexWaits() {
+	res, err := s.db.QueryReturnColumnDict(mutexQuery)
 	if err != nil {
-		return err
+		s.db.Log(err)
+		return
 	}
+
+	//Searching for the strings "&buf_pool->LRU_list_mutex" and "&buf_pool->zip_mutex"
+	// in query result for the mutex's status
 	mets := map[string]*metrics.Counter{"&buf_pool->LRU_list_mutex": s.Metrics.InnodbBufpoolLRUMutexOSWait,
 		"&buf_pool->zip_mutex": s.Metrics.InnodbBufpoolZipMutexOSWait}
 	for i, name := range res["Name"] {
@@ -309,42 +345,39 @@ func (s *MysqlStat) getInnodbBufferpoolMutexWaits(i int) error {
 		metric, ok := mets[name]
 		if ok {
 			if !strings.Contains(status, "os_waits=") {
-				return errors.New("mutex status did not contain 'os_waits=': " + status)
+				s.db.Log(errors.New("mutex status did not contain 'os_waits=': " + status))
+				return
 			}
 			os_waits, err := strconv.ParseInt(status[9:], 10, 64)
 			if err != nil {
-				return err
+				s.db.Log(err)
 			}
 			metric.Set(uint64(os_waits))
 		}
 	}
-	return nil
+	return
 }
 
 //get time of oldest query in seconds
-func (s *MysqlStat) getOldest() error {
-	cmd := `
- SELECT time FROM information_schema.processlist
-  WHERE command NOT IN ('Sleep','Connect','Binlog Dump')
-  ORDER BY time DESC LIMIT 1;`
-
-	res, err := s.db.QueryReturnColumnDict(cmd)
+func (s *MysqlStat) getOldest() {
+	res, err := s.db.QueryReturnColumnDict(oldestQuery)
 	if err != nil {
-		return err
+		s.db.Log(err)
+		return
 	}
 	t := int64(0)
 	if time, ok := res["time"]; ok && len(time) > 0 {
 		t, err = strconv.ParseInt(time[0], 10, 64)
 		if err != nil {
-			s.db.Logger.Println(err)
+			s.db.Log(err)
 		}
 	}
 	s.Metrics.OldestQuery.Set(float64(t))
-	return nil
+	return
 }
 
 //calculate query response times
-func (s *MysqlStat) getQueryResponseTime() error {
+func (s *MysqlStat) getQueryResponseTime() {
 	timers := map[string]*metrics.Counter{
 		".000001":  s.Metrics.QueryResponseSec_000001,
 		".00001":   s.Metrics.QueryResponseSec_00001,
@@ -361,15 +394,16 @@ func (s *MysqlStat) getQueryResponseTime() error {
 		"1000000.": s.Metrics.QueryResponseSec100000_,
 	}
 
-	res, err := s.db.QueryReturnColumnDict("SELECT time, count FROM INFORMATION_SCHEMA.QUERY_RESPONSE_TIME;")
+	res, err := s.db.QueryReturnColumnDict(responseTimeQuery)
 	if err != nil {
-		return err
+		s.db.Log(err)
+		return
 	}
 
 	for i, time := range res["time"] {
 		count, err := strconv.ParseInt(res["count"][i], 10, 64)
 		if err != nil {
-			s.db.Logger.Println(err)
+			s.db.Log(err)
 		}
 		if count < 1 {
 			continue
@@ -379,152 +413,143 @@ func (s *MysqlStat) getQueryResponseTime() error {
 			timer.Set(uint64(count))
 		}
 	}
-	return nil
+	return
 }
 
 //gets status on binary logs
-func (s *MysqlStat) getBinlogFiles() error {
-	res, err := s.db.QueryReturnColumnDict("SHOW MASTER LOGS;")
+func (s *MysqlStat) getBinlogFiles() {
+	res, err := s.db.QueryReturnColumnDict(binlogQuery)
 	if err != nil {
-		return err
+		s.db.Log(err)
+		return
 	}
 	s.Metrics.BinlogFiles.Set(float64(len(res["File_size"])))
 	binlog_total_size := int64(0)
 	for _, size := range res["File_size"] {
 		si, err := strconv.ParseInt(size, 10, 64)
 		if err != nil {
-			s.db.Logger.Println(err) //don't return err so we can continue with more values
+			s.db.Log(err) //don't return err so we can continue with more values
 		}
 		binlog_total_size += si
 	}
 	s.Metrics.BinlogSize.Set(float64(binlog_total_size))
-	return nil
+	return
 }
 
 //get number of long running queries
-func (s *MysqlStat) getNumLongRunQueries() error {
-	cmd := `
-    SELECT * FROM information_schema.processlist
-     WHERE command NOT IN ('Sleep', 'Connect', 'Binlog Dump')
-       AND time > 30;`
-	res, err := s.db.QueryReturnColumnDict(cmd)
+func (s *MysqlStat) getNumLongRunQueries() {
+	res, err := s.db.QueryReturnColumnDict(longQuery)
 	if err != nil {
-		return err
+		s.db.Log(err)
+		return
 	}
 	found_sql := len(res["ID"])
 	s.Metrics.ActiveLongRunQueries.Set(float64(found_sql))
-	return nil
+	return
 }
 
 //get version
 //version is of the form '1.2.34-56.7' or '9.8.76a-54.3-log'
 // want to represent version in form '1.234567' or '9.876543'
-func (s *MysqlStat) getVersion() error {
-	res, err := s.db.QueryReturnColumnDict("SELECT VERSION();")
+func (s *MysqlStat) getVersion() {
+	res, err := s.db.QueryReturnColumnDict(versionQuery)
 	if err != nil {
-		return err
+		s.db.Log(err)
+		return
+	}
+	if len(res["VERSION()"]) == 0 {
+		return
 	}
 	version := res["VERSION()"][0]
 	//filter out letters
-	f := func(r rune) rune {
+	f := func(r rune) bool {
 		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') {
-			return 'A'
+			return true
 		}
-		return r
+		return false
 	}
-	version = strings.Replace(strings.Map(f, version), "A", "", -1)
-	version = strings.Replace(strings.Replace(version, "-", ".", -1), "_", ".", -1)
+	version = strings.Join(strings.FieldsFunc(version, f), "")                      //filters out letters from string
+	version = strings.Replace(strings.Replace(version, "-", ".", -1), "_", ".", -1) //replaces "_" and "-" with "."
 	leading := float64(len(strings.Split(version, ".")[0]))
 	version = strings.Replace(version, ".", "", -1)
 	ver, err := strconv.ParseFloat(version, 64)
 	ver /= math.Pow(10.0, (float64(len(version)) - leading))
 	s.Metrics.Version.Set(ver)
-	return err
+	if err != nil {
+		s.db.Log(err)
+	}
+	return
 }
 
 // get binlog statistics
-func (s *MysqlStat) getBinlogStats() error {
-	res, err := s.db.QueryReturnColumnDict("SHOW MASTER STATUS;")
+func (s *MysqlStat) getBinlogStats() {
+	res, err := s.db.QueryReturnColumnDict(binlogStatsQuery)
 	if err != nil {
-		return err
+		s.db.Log(err)
+		return
 	}
 	if len(res["File"]) == 0 || len(res["Position"]) == 0 {
-		return nil
+		return
 	}
 
 	v, err := strconv.ParseFloat(strings.Split(string(res["File"][0]), ".")[1], 64)
 	if err != nil {
-		s.db.Logger.Println(err)
+		s.db.Log(err)
 	}
 	s.Metrics.BinlogSeqFile.Set(float64(v))
 	v, err = strconv.ParseFloat(string(res["Position"][0]), 64)
 	if err != nil {
-		s.db.Logger.Println(err)
+		s.db.Log(err)
 	}
 	s.Metrics.BinlogPosition.Set(uint64(v))
-	return nil
+	return
 }
 
 //detect application bugs which result in multiple instance of the same query "stacking up"/ executing at the same time
-func (s *MysqlStat) getStackedQueries() error {
-	cmd := `
-  SELECT COUNT(*) AS identical_queries_stacked, 
-         MAX(time) AS max_age, 
-         GROUP_CONCAT(id SEPARATOR ' ') AS thread_ids, 
-         info as query 
-    FROM information_schema.processlist 
-   WHERE user != 'system user'
-     AND user NOT LIKE 'repl%'
-     AND info IS NOT NULL
-   GROUP BY 4
-  HAVING COUNT(*) > 1
-     AND MAX(time) > 300
-   ORDER BY 2 DESC;`
+func (s *MysqlStat) getStackedQueries() {
+	cmd := stackedQuery
 	res, err := s.db.QueryReturnColumnDict(cmd)
 	if err != nil {
-		return err
+		s.db.Log(err)
+		return
 	}
 	if len(res["identical_queries_stacked"]) > 0 {
 		count, err := strconv.ParseFloat(string(res["identical_queries_stacked"][0]), 64)
 		if err != nil {
-			s.db.Logger.Println(err)
+			s.db.Log(err)
 		}
 		s.Metrics.IdenticalQueriesStacked.Set(float64(count))
 		age, err := strconv.ParseFloat(string(res["max_age"][0]), 64)
 		if err != nil {
-			s.db.Logger.Println(err)
+			s.db.Log(err)
 		}
 		s.Metrics.IdenticalQueriesMaxAge.Set(float64(age))
 	}
-	return nil
+	return
 }
 
 //get session stats
-func (s *MysqlStat) getSessions() error {
-	res, err := s.db.QueryReturnColumnDict("SELECT @@GLOBAL.max_connections;")
+func (s *MysqlStat) getSessions() {
+	res, err := s.db.QueryReturnColumnDict(sessionQuery1)
 	if err != nil {
-		return err
+		s.db.Log(err)
+		return
 	}
 	var max_sessions int64
 	for _, val := range res {
 		max_sessions, err = strconv.ParseInt(val[0], 10, 64)
 		if err != nil {
-			s.db.Logger.Println(err)
+			s.db.Log(err)
 		}
 		s.Metrics.MaxConnections.Set(float64(max_sessions))
 	}
-	cmd := `
-    SELECT IF(command LIKE 'Sleep',1,0) +
-           IF(state LIKE '%master%' OR state LIKE '%slave%',1,0) AS sort_col,
-           processlist.*
-      FROM information_schema.processlist
-     ORDER BY 1, time DESC;`
-	res, err = s.db.QueryReturnColumnDict(cmd)
+	res, err = s.db.QueryReturnColumnDict(sessionQuery2)
 	if err != nil {
-		return err
+		s.db.Log(err)
+		return
 	}
 	if len(res["COMMAND"]) == 0 {
-		return nil
+		return
 	}
 	current_total := len(res["COMMAND"])
 	s.Metrics.CurrentSessions.Set(float64(current_total))
@@ -558,7 +583,7 @@ func (s *MysqlStat) getSessions() error {
 		}
 	}
 	s.Metrics.ActiveSessions.Set(active)
-	s.Metrics.BusySessionPct.Set(active / float64(current_total))
+	s.Metrics.BusySessionPct.Set((active / float64(current_total)) * float64(100))
 	s.Metrics.UnauthenticatedSessions.Set(float64(unauthenticated))
 	s.Metrics.LockedSessions.Set(float64(locked))
 	s.Metrics.TablesLocks.Set(float64(table_lock_wait))
@@ -566,26 +591,28 @@ func (s *MysqlStat) getSessions() error {
 	s.Metrics.CopyingToTable.Set(float64(copy_to_table))
 	s.Metrics.Statistics.Set(float64(statistics))
 
-	return nil
+	return
 }
 
 //metrics from innodb
-func (s *MysqlStat) getInnodbStats() error {
-	res, err := s.db.QueryReturnColumnDict("SHOW GLOBAL VARIABLES LIKE 'innodb_log_file_size';")
+func (s *MysqlStat) getInnodbStats() {
+	res, err := s.db.QueryReturnColumnDict(innodbQuery)
 	if err != nil {
-		return err
+		s.db.Log(err)
+		return
 	}
 	var innodb_log_file_size int64
 	if err == nil && len(res["Value"]) > 0 {
 		innodb_log_file_size, err = strconv.ParseInt(res["Value"][0], 10, 64)
 		if err != nil {
-			s.db.Logger.Println(err)
+			s.db.Log(err)
 		}
 	}
 
 	res, err = s.db.QueryReturnColumnDict("SHOW ENGINE INNODB STATUS")
 	if err != nil {
-		return err
+		s.db.Log(err)
+		return
 	}
 
 	//parse the result
@@ -642,8 +669,9 @@ func (s *MysqlStat) getInnodbStats() error {
 		if ok {
 			val, err := strconv.ParseFloat(string(v), 64)
 			if err != nil {
-				s.db.Logger.Println(err)
+				s.db.Log(err)
 			}
+			//case based on type so can switch between Gauge and Counter easily
 			switch met := metric.(type) {
 			case *metrics.Counter:
 				met.Set(uint64(val))
@@ -656,7 +684,32 @@ func (s *MysqlStat) getInnodbStats() error {
 		lsn_s, _ := strconv.ParseFloat(lsn, 64)
 		s.Metrics.InnodbLogWriteRatio.Set((lsn_s * 3600.0) / float64(innodb_log_file_size))
 	}
-	return nil
+	return
+}
+
+func (s *MysqlStat) getBackups() {
+	out, err := exec.Command("ps", "aux").Output()
+	if err != nil {
+		s.db.Log(err)
+		return
+	}
+	blob := string(out)
+	lines := strings.Split(blob, "\n")
+	backupProcs := 0
+	for _, line := range lines {
+		words := strings.Split(line, " ")
+		if len(words) < 10 {
+			continue
+		}
+		command := strings.Join(words[10:], " ")
+		if strings.Contains(command, "innobackupex") ||
+			strings.Contains(command, "mysqldump") ||
+			strings.Contains(command, "mydumper") {
+			backupProcs += 1
+		}
+	}
+	s.Metrics.BackupsRunning.Set(float64(backupProcs))
+	return
 }
 
 func (s *MysqlStat) getBackups() error {
