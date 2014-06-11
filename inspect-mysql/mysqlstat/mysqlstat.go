@@ -712,30 +712,6 @@ func (s *MysqlStat) getBackups() {
 	return
 }
 
-func (s *MysqlStat) getBackups() error {
-	out, err := exec.Command("ps", "aux").Output()
-	if err != nil {
-		return err
-	}
-	blob := string(out)
-	lines := strings.Split(blob, "\n")
-	backupProcs := 0
-	for _, line := range lines {
-		words := strings.Split(line, " ")
-		if len(words) < 10 {
-			continue
-		}
-		command := strings.Join(words[10:], " ")
-		if strings.Contains(command, "innobackupex") ||
-			strings.Contains(command, "mysqldump") ||
-			strings.Contains(command, "mydumper") {
-			backupProcs += 1
-		}
-	}
-	s.Metrics.BackupsRunning.Set(float64(backupProcs))
-	return nil
-}
-
 func (s *MysqlStat) Close() {
 	s.db.Close()
 }
