@@ -452,7 +452,10 @@ func (s *PostgresStat) getOldest() {
 		}
 		v, ok := res["oldest"]
 		if !ok || len(v) == 0 {
-			// s.db.Log(err)
+			continue
+		}
+		if v[0] == "" {
+			metric.Set(float64(0))
 			continue
 		}
 		val, err := strconv.ParseFloat(v[0], 64)
@@ -513,7 +516,6 @@ func (s *PostgresStat) getLocks() {
 func (s *PostgresStat) getVacuumsInProgress() {
 	cmd := fmt.Sprintf(vacuumsQuery, s.queryCol, s.queryCol)
 	res, err := s.db.QueryReturnColumnDict(cmd)
-	s.db.Log(res)
 	if err != nil {
 		s.db.Log(err)
 		return
@@ -579,7 +581,8 @@ func (s *PostgresStat) getMainProcessInfo() {
 	}
 }
 
-//TODO: double check this before testing
+//get writeability
+// by creating a schema, creating a table, adding to that table and then deleting it
 func (s *PostgresStat) getWriteability() {
 	_, err := s.db.QueryReturnColumnDict("CREATE SCHEMA postgres_health;")
 	if err != nil {
@@ -590,17 +593,25 @@ func (s *PostgresStat) getWriteability() {
          (id INT PRIMARY KEY, stamp TIMESTAMP);`
 	_, err = s.db.QueryReturnColumnDict(cmd)
 	if err != nil {
-		s.Metrics.Writable.Set(float64(0))
+		if strings.Contains(err.Error(), "read-only") {
+			s.Metrics.Writable.Set(float64(0))
+			return
+		} else if strings.Contains(err.Error(), "already exists") {
+			s.db.Log("writeability check failed, test schema already exists")
+			return
+		}
+		s.db.QueryReturnColumnDict("ROLLBACK;")
 	}
+	cmd = `
+        CREATE TABLE IF NOT EXISTS postgres_health.postgres_health 
+        (id INT PRIMARY KEY, stamp TIMESTAMP);`
+	s.db.QueryReturnColumnDict(cmd)
 	cmd = `
         BEGIN;
         DELETE FROM postgres_health.postgres_health;
         INSERT INTO postgres_health.postgres_health VALUES (1, NOW());
         COMMIT;`
-	_, err = s.db.QueryReturnColumnDict(cmd)
-	if err != nil {
-		s.Metrics.Writable.Set(float64(0))
-	}
+	s.db.QueryReturnColumnDict(cmd)
 	s.Metrics.Writable.Set(float64(1))
 }
 

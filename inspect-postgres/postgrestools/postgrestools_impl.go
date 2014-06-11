@@ -154,7 +154,7 @@ func makeDsn(dsn map[string]string) string {
 }
 
 func (database *postgresDB) Log(in interface{}) {
-	_, f, line, ok := runtime.Caller(0)
+	_, f, line, ok := runtime.Caller(1)
 	if ok {
 		database.Logger.Println("Called from: " + f + " line: " + strconv.Itoa(line))
 	}
