@@ -2,10 +2,10 @@ package mysqlstat
 
 import (
 	"errors"
-	"fmt"
 	"log"
 	"os"
 	"strconv"
+	"syscall"
 	"testing"
 	"time"
 
@@ -29,6 +29,8 @@ var (
 	// can switch between metrics.Gauge and metrics.Counter
 	// and between float64 and uint64 easily
 	expectedValues = map[interface{}]interface{}{}
+
+	logFile, _ = os.OpenFile("./test.log", os.O_WRONLY|os.O_CREATE|os.O_SYNC, 0644)
 )
 
 //functions that behave like mysqltools but we can make it return whatever
@@ -54,6 +56,7 @@ func (s *testMysqlDB) Close() {
 //initializes a test instance of MysqlStat
 // instance does not connect with a db
 func initMysqlStat() *MysqlStat {
+	syscall.Dup2(int(logFile.Fd()), 2)
 	s := new(MysqlStat)
 	s.db = &testMysqlDB{
 		Logger: log.New(os.Stderr, "TESTING LOG: ", log.Lshortfile),
@@ -95,7 +98,6 @@ func checkResults() string {
 
 // Test basic parsing of all fields
 func TestBasic(t *testing.T) {
-	fmt.Println("Basic Test")
 	//intitialize MysqlStat
 	s := initMysqlStat()
 	//set desired test output
@@ -194,18 +196,16 @@ func TestBasic(t *testing.T) {
 		s.Metrics.InnodbBufpoolLRUMutexOSWait: uint64(54321),
 		s.Metrics.InnodbBufpoolZipMutexOSWait: uint64(4321),
 	}
-	s.Collect(0)
+	s.Collect()
 	time.Sleep(time.Millisecond * 1000 * 1)
 	err := checkResults()
 	if err != "" {
 		t.Error(err)
 	}
-	fmt.Println("PASS")
 }
 
 //test parsing of version
-func TestVersion(t *testing.T) {
-	fmt.Println("Test Version")
+func TestVersion1(t *testing.T) {
 	//intialize MysqlStat
 	s := initMysqlStat()
 
@@ -221,13 +221,18 @@ func TestVersion(t *testing.T) {
 	}
 	//make sure to sleep for ~1 second before checking results
 	// otherwise no metrics will be collected in time
-	s.Collect(0)
+	s.Collect()
 	time.Sleep(time.Millisecond * 1000 * 1)
 	//check results
 	err := checkResults()
 	if err != "" {
 		t.Error(err)
 	}
+}
+
+func TestVersion2(t *testing.T) {
+	//intialize MysqlStat
+	s := initMysqlStat()
 	//repeat for different test results
 	testquerycol = map[string]map[string][]string{
 		versionQuery: map[string][]string{
@@ -237,13 +242,17 @@ func TestVersion(t *testing.T) {
 	expectedValues = map[interface{}]interface{}{
 		s.Metrics.Version: float64(123456.987),
 	}
-	s.Collect(0)
+	s.Collect()
 	time.Sleep(time.Millisecond * 1000 * 1)
-	err = checkResults()
+	err := checkResults()
 	if err != "" {
 		t.Error(err)
 	}
+}
 
+func TestVersion3(t *testing.T) {
+	//intialize MysqlStat
+	s := initMysqlStat()
 	testquerycol = map[string]map[string][]string{
 		versionQuery: map[string][]string{
 			"VERSION()": []string{"abcdefg-123-456-qwerty"},
@@ -252,17 +261,15 @@ func TestVersion(t *testing.T) {
 	expectedValues = map[interface{}]interface{}{
 		s.Metrics.Version: float64(0.123456),
 	}
-	s.Collect(0)
+	s.Collect()
 	time.Sleep(time.Millisecond * 1000 * 1)
-	err = checkResults()
+	err := checkResults()
 	if err != "" {
 		t.Error(err)
 	}
-	fmt.Println("PASS")
 }
 
-func TestMutexes(t *testing.T) {
-	fmt.Println("Test Mutexes")
+func TestMutexes1(t *testing.T) {
 	//intialize MysqlStat
 	s := initMysqlStat()
 
@@ -281,14 +288,18 @@ func TestMutexes(t *testing.T) {
 	}
 	//make sure to sleep for ~1 second before checking results
 	// otherwise no metrics will be collected in time
-	s.Collect(0)
+	s.Collect()
 	time.Sleep(time.Millisecond * 1000 * 1)
 	//check results
 	err := checkResults()
 	if err != "" {
 		t.Error(err)
 	}
+}
 
+func TestMutexes2(t *testing.T) {
+	//intialize MysqlStat
+	s := initMysqlStat()
 	testquerycol = map[string]map[string][]string{
 		mutexQuery: map[string][]string{
 			"Name": []string{"some other string", "&buf_pool->LRU_list_mutex",
@@ -301,18 +312,16 @@ func TestMutexes(t *testing.T) {
 		s.Metrics.InnodbBufpoolLRUMutexOSWait: uint64(2),
 		s.Metrics.InnodbBufpoolZipMutexOSWait: uint64(3),
 	}
-	s.Collect(0)
+	s.Collect()
 	time.Sleep(time.Millisecond * 1000 * 1)
-	err = checkResults()
+	err := checkResults()
 	if err != "" {
 		t.Error(err)
 	}
-	fmt.Println("PASS")
 }
 
 //Test Parsing of sessions query
 func TestSessions(t *testing.T) {
-	fmt.Println("Testing Sessions")
 	//initialize MysqlStat
 	s := initMysqlStat()
 	//set desired query output
@@ -344,18 +353,16 @@ func TestSessions(t *testing.T) {
 		s.Metrics.CopyingToTable:          float64(2),
 		s.Metrics.Statistics:              float64(3),
 	}
-	s.Collect(0)
+	s.Collect()
 	time.Sleep(time.Millisecond * 1000 * 1)
 	err := checkResults()
 	if err != "" {
 		t.Error(err)
 	}
-	fmt.Println("PASS")
 }
 
 // Test basic parsing of slave info query
-func TestSlave(t *testing.T) {
-	fmt.Println("Slave Stats Test")
+func TestSlave1(t *testing.T) {
 	//intitialize MysqlStat
 	s := initMysqlStat()
 	//set desired test output
@@ -372,13 +379,18 @@ func TestSlave(t *testing.T) {
 		s.Metrics.SlaveSeqFile:             float64(1345),
 		s.Metrics.SlavePosition:            uint64(7),
 	}
-	s.Collect(0)
+	s.Collect()
 	time.Sleep(time.Millisecond * 1000 * 1)
 	err := checkResults()
 	if err != "" {
 		t.Error(err)
 	}
+}
 
+// Test basic parsing of slave info query
+func TestSlave2(t *testing.T) {
+	//intitialize MysqlStat
+	s := initMysqlStat()
 	//set desired test output
 	testquerycol = map[string]map[string][]string{
 		//getSlaveStats()
@@ -393,12 +405,10 @@ func TestSlave(t *testing.T) {
 		s.Metrics.SlaveSeqFile:             float64(1345),
 		s.Metrics.SlavePosition:            uint64(7),
 	}
-	s.Collect(0)
+	s.Collect()
 	time.Sleep(time.Millisecond * 1000 * 1)
-	err = checkResults()
+	err := checkResults()
 	if err != "" {
 		t.Error(err)
 	}
-
-	fmt.Println("PASS")
 }

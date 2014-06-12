@@ -1,10 +1,11 @@
 package mysqlstattable
 
 import (
-	"fmt"
 	"log"
 	"os"
 	"strconv"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -28,6 +29,10 @@ var (
 	// can switch between metrics.Gauge and metrics.Counter
 	// and between float64 and uint64 easily
 	expectedValues = map[interface{}]interface{}{}
+
+	logFile, _ = os.OpenFile("./test.log", os.O_WRONLY|os.O_CREATE|os.O_SYNC, 0644)
+
+	mu = sync.Mutex{}
 )
 
 //functions that behave like mysqltools but we can make it return whatever
@@ -48,10 +53,12 @@ func (s *testMysqlDB) Close() {
 }
 
 func initMysqlStatTable() *MysqlStatTables {
+	syscall.Dup2(int(logFile.Fd()), 2)
 	s := new(MysqlStatTables)
 	s.db = &testMysqlDB{
 		Logger: log.New(os.Stderr, "TESTING LOG: ", log.Lshortfile),
 	}
+	s.nLock = &sync.Mutex{}
 
 	s.m = metrics.NewMetricContext("system")
 	s.DBs = make(map[string]*DBStats)
@@ -88,10 +95,10 @@ func checkResults() string {
 }
 
 func TestBasic(t *testing.T) {
-	fmt.Println("Basic Test")
 
+	mu.Lock()
 	s := initMysqlStatTable()
-
+	s.nLock.Lock()
 	testquerycol = map[string]map[string][]string{
 		innodbMetadataCheck: map[string][]string{
 			"innodb_stats_on_metadata": []string{"0"},
@@ -116,12 +123,13 @@ func TestBasic(t *testing.T) {
 			"rows_changed_x_indexes": []string{"31", "32", "33", "34", "35"},
 		},
 	}
-
+	s.nLock.Unlock()
 	s.Collect()
 	time.Sleep(time.Millisecond * 1000 * 1)
 
 	// define expected values after running collect so that databases and
 	// tables are instantiated
+	s.nLock.Lock()
 	expectedValues = map[interface{}]interface{}{
 		s.DBs["db1"].Metrics.SizeBytes:                float64(100),
 		s.DBs["db2"].Metrics.SizeBytes:                float64(200),
@@ -150,17 +158,18 @@ func TestBasic(t *testing.T) {
 		s.DBs["db5"].Tables["t1"].RowsChangedXIndexes: uint64(35),
 	}
 	err := checkResults()
+	s.nLock.Unlock()
+	mu.Unlock()
 	if err != "" {
 		t.Error(err)
 	}
-	fmt.Println("PASS")
 }
 
 func TestDBSizes(t *testing.T) {
-	fmt.Println("Database Sizes Test")
+	mu.Lock()
 
 	s := initMysqlStatTable()
-
+	s.nLock.Lock()
 	testquerycol = map[string]map[string][]string{
 		innodbMetadataCheck: map[string][]string{
 			"innodb_stats_on_metadata": []string{"0"},
@@ -176,10 +185,10 @@ func TestDBSizes(t *testing.T) {
 			"db6": []string{"600"},
 		},
 	}
-
+	s.nLock.Unlock()
 	s.Collect()
 	time.Sleep(time.Millisecond * 1000 * 1)
-
+	s.nLock.Lock()
 	expectedValues = map[interface{}]interface{}{
 		s.DBs["db1"].Metrics.SizeBytes: float64(100),
 		s.DBs["db2"].Metrics.SizeBytes: float64(200),
@@ -189,17 +198,18 @@ func TestDBSizes(t *testing.T) {
 		s.DBs["db6"].Metrics.SizeBytes: float64(600),
 	}
 	err := checkResults()
+	s.nLock.Unlock()
+	mu.Unlock()
 	if err != "" {
 		t.Error(err)
 	}
-	fmt.Println("PASS")
 }
 
 func TestTableSizes(t *testing.T) {
-	fmt.Println("Test Table Sizes")
+	mu.Lock()
 
 	s := initMysqlStatTable()
-
+	s.nLock.Lock()
 	testquerycol = map[string]map[string][]string{
 		innodbMetadataCheck: map[string][]string{
 			"innodb_stats_on_metadata": []string{"0"},
@@ -210,10 +220,11 @@ func TestTableSizes(t *testing.T) {
 			"tbl_size_bytes": []string{"1", "2", "3", "4", "5", "6", "7"},
 		},
 	}
-
+	s.nLock.Unlock()
 	s.Collect()
 	time.Sleep(time.Millisecond * 1000 * 1)
 
+	s.nLock.Lock()
 	expectedValues = map[interface{}]interface{}{
 		s.DBs["db1"].Tables["t1"].SizeBytes: float64(1),
 		s.DBs["db1"].Tables["t2"].SizeBytes: float64(2),
@@ -224,17 +235,18 @@ func TestTableSizes(t *testing.T) {
 		s.DBs["db4"].Tables["t1"].SizeBytes: float64(7),
 	}
 	err := checkResults()
+	s.nLock.Unlock()
+	mu.Unlock()
 	if err != "" {
 		t.Error(err)
 	}
-	fmt.Println("PASS")
 }
 
 func TestTableStats(t *testing.T) {
-	fmt.Println("Table Stats Test")
+	mu.Lock()
 
 	s := initMysqlStatTable()
-
+	s.nLock.Lock()
 	testquerycol = map[string]map[string][]string{
 		tblStatisticsQuery: map[string][]string{
 			"db":                     []string{"db1", "db1", "db2", "db3", "db5"},
@@ -244,10 +256,11 @@ func TestTableStats(t *testing.T) {
 			"rows_changed_x_indexes": []string{"31", "32", "33", "34", "35"},
 		},
 	}
-
+	s.nLock.Unlock()
 	s.Collect()
 	time.Sleep(time.Millisecond * 1000 * 1)
 
+	s.nLock.Lock()
 	expectedValues = map[interface{}]interface{}{
 		s.DBs["db1"].Tables["t1"].RowsRead:            uint64(11),
 		s.DBs["db1"].Tables["t2"].RowsRead:            uint64(12),
@@ -266,17 +279,18 @@ func TestTableStats(t *testing.T) {
 		s.DBs["db5"].Tables["t1"].RowsChangedXIndexes: uint64(35),
 	}
 	err := checkResults()
+	s.nLock.Unlock()
+	mu.Unlock()
 	if err != "" {
 		t.Error(err)
 	}
-	fmt.Println("PASS")
 }
 
 func TestNoSizes(t *testing.T) {
-	fmt.Println("No Sizes Test -- should not gather metrics on sizes")
+	mu.Lock()
 
 	s := initMysqlStatTable()
-
+	s.nLock.Lock()
 	testquerycol = map[string]map[string][]string{
 		innodbMetadataCheck: map[string][]string{
 			"innodb_stats_on_metadata": []string{"1"},
@@ -292,10 +306,12 @@ func TestNoSizes(t *testing.T) {
 			"tbl_size_bytes": []string{"1", "2", "3", "4", "5", "6", "7"},
 		},
 	}
-
+	s.nLock.Unlock()
 	s.Collect()
 	time.Sleep(time.Millisecond * 1000 * 1)
-
+	mu.Unlock()
+	s.nLock.Lock()
+	defer s.nLock.Unlock()
 	_, ok := s.DBs["db1"]
 	if ok {
 		t.Error("found database, but should not have")
@@ -308,5 +324,4 @@ func TestNoSizes(t *testing.T) {
 	if ok {
 		t.Error("found database, but should not have")
 	}
-	fmt.Println("PASS")
 }
