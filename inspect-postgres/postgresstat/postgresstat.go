@@ -245,6 +245,7 @@ func (s *PostgresStat) Collect() {
 	go s.getSlaveDelayBytes()
 	go s.getSecurity()
 	go s.getBackups()
+	go s.getWriteability()
 }
 
 //get uptime
