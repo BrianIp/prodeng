@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/square/prodeng/inspect-postgres/postgrestools"
@@ -29,6 +30,8 @@ type PostgresStat struct {
 	pidCol   string
 	PGDATA   string
 	dsn      map[string]string
+	dbLock   *sync.Mutex
+	modeLock *sync.Mutex
 }
 
 //ModeMetrics - metrics on lock modes
@@ -167,6 +170,8 @@ func New(m *metrics.MetricContext, Step time.Duration, user, config string) (*Po
 	s.Modes = make(map[string]*ModeMetrics)
 	s.DBs = make(map[string]*DBMetrics)
 	s.db, err = postgrestools.New(s.dsn)
+	s.dbLock = &sync.Mutex{}
+	s.modeLock = &sync.Mutex{}
 	s.m = m
 	s.PGDATA = "/data/pgsql"
 	if err != nil {
@@ -196,34 +201,37 @@ func PostgresStatMetricsNew(m *metrics.MetricContext, Step time.Duration) *Postg
 
 //checks for initialization of db metrics
 func (s *PostgresStat) checkDB(dbname string) {
+	s.dbLock.Lock()
 	if _, ok := s.DBs[dbname]; !ok {
 		o := new(DBMetrics)
 		o.Tables = make(map[string]*TableMetrics)
 		misc.InitializeMetrics(o, s.m, "postgresstat."+dbname, true)
 		s.DBs[dbname] = o
 	}
-
+	s.dbLock.Unlock()
 }
 
 //checks for initialization of lock mode metrics
 func (s *PostgresStat) checkMode(name string) {
+	s.modeLock.Lock()
 	if _, ok := s.Modes[name]; !ok {
 		o := new(ModeMetrics)
 		misc.InitializeMetrics(o, s.m, "postgresstat.lock"+name, true)
 		s.Modes[name] = o
 	}
-
+	s.modeLock.Unlock()
 }
 
 //checks for intialization of table metrics
 func (s *PostgresStat) checkTable(dbname, tblname string) {
 	s.checkDB(dbname)
+	s.dbLock.Lock()
 	if _, ok := s.DBs[dbname].Tables[tblname]; !ok {
 		o := new(TableMetrics)
 		misc.InitializeMetrics(o, s.m, "postgresstat."+dbname+"."+tblname, true)
 		s.DBs[dbname].Tables[tblname] = o
 	}
-
+	s.dbLock.Unlock()
 }
 
 //runs metrics collections
@@ -508,7 +516,9 @@ func (s *PostgresStat) getLocks() {
 		}
 		lock, _ := strconv.ParseInt(locks[0], 10, 64)
 		s.checkMode(mode)
+		s.modeLock.Lock()
 		s.Modes[mode].Locks.Set(float64(lock))
+		s.modeLock.Unlock()
 	}
 
 }
@@ -655,7 +665,9 @@ func (s *PostgresStat) getSizes() {
 		}
 		if size > 0 {
 			s.checkDB(dbname)
+			s.dbLock.Lock()
 			s.DBs[dbname].SizeBytes.Set(float64(size))
+			s.dbLock.Unlock()
 		}
 	}
 
@@ -680,7 +692,9 @@ func (s *PostgresStat) getSizes() {
 			size, _ := strconv.ParseInt(sizes[0], 10, 64)
 			if size > 0 {
 				s.checkTable(dbname, relation)
+				s.dbLock.Lock()
 				s.DBs[dbname].Tables[relation].SizeBytes.Set(float64(size))
+				s.dbLock.Unlock()
 			}
 		}
 		newDB.Close()

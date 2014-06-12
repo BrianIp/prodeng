@@ -6,6 +6,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -70,6 +71,8 @@ func initPostgresStat() *PostgresStat {
 	s.DBs = make(map[string]*DBMetrics)
 	s.Metrics = PostgresStatMetricsNew(s.m,
 		time.Millisecond*time.Duration(1)*1000)
+	s.dbLock = &sync.Mutex{}
+	s.modeLock = &sync.Mutex{}
 	s.pidCol = "procpid"
 	s.queryCol = "current_query"
 	s.idleCol = s.queryCol
