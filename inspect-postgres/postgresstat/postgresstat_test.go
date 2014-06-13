@@ -1,3 +1,19 @@
+//Copyright (c) 2014 Square, Inc
+//
+// Tests the metrics collecting functions for postgresstat.go.
+// Tests do not connect to a database, dummy functions are used instead and return hard coded
+// input. Testing connections (will) be done in postgrestools_test.go.
+//
+// Each test first sets input data, and uses Collect() to gather
+// metrics rather than calling that metric's get function.
+// This ensures that other functions still work on malformed
+// or missing input, such as what would happend with an incorrect query.
+// Testing the correctness of postgres queries should be done manually.
+//
+// Integration/Acceptance testing is harder and is avoided because
+// creating and populating a fake database with the necessary information
+// may be more trouble than is worth. Manual testing may be required for
+// full acceptance tests.
 package postgresstat
 
 import (
@@ -58,6 +74,8 @@ func (s *testPostgresDB) Close() {
 	return
 }
 
+//Initializes test instance of PostgresStat
+// Important to not connect to database
 func initPostgresStat() *PostgresStat {
 	syscall.Dup2(int(logFile.Fd()), 2)
 
@@ -117,6 +135,10 @@ func checkResults() string {
 	return ""
 }
 
+//TestBasic parsing of all fields.
+//Most metrics are simple parsing of strings to ints/floats.
+//More complex string manipulations are further tested in
+//later test functions.
 func TestBasic(t *testing.T) {
 	//initialize PostgresStat
 	s := initPostgresStat()
