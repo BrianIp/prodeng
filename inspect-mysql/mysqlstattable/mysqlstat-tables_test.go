@@ -1,3 +1,16 @@
+//Copyright (c) 2014 Square, Inc
+//
+// Tests the metrics collecting functions for mysqlstat-tables.go.
+// Tests do not connect to a database, dummy functions are
+// used instead and return hard coded input. Testing connections
+// to a database are done in mysqltools_test.go.
+//
+// Each test first sets input data, and uses Collect() to
+// gather metrics rather than calling that metric's get function.
+// This ensures that other functions still work on malformed or missing
+// input, such as what would happen with an incorrect query.
+// Testing the correctness of mysql queries should be done manually.
+
 package mysqlstattable
 
 import (
@@ -94,6 +107,10 @@ func checkResults() string {
 	return ""
 }
 
+// TestBasic parsing of all fields.
+// Most metrics are simple parsing strings to ints/floats.
+// More complex string manipulations are further tested in
+// later test functions.
 func TestBasic(t *testing.T) {
 
 	mu.Lock()
@@ -214,6 +231,8 @@ func TestTableSizes(t *testing.T) {
 		innodbMetadataCheck: map[string][]string{
 			"innodb_stats_on_metadata": []string{"0"},
 		},
+		// Test giving information for tables without the schema they
+		// belong in being previously defined
 		tblSizesQuery: map[string][]string{
 			"tbl":            []string{"t1", "t2", "t3", "t1", "t2", "t1", "t1"},
 			"db":             []string{"db1", "db1", "db1", "db2", "db2", "db3", "db4"},
@@ -248,6 +267,8 @@ func TestTableStats(t *testing.T) {
 	s := initMysqlStatTable()
 	s.nLock.Lock()
 	testquerycol = map[string]map[string][]string{
+		// Test giving information for tables without the schema they
+		// belong in being previously defined
 		tblStatisticsQuery: map[string][]string{
 			"db":                     []string{"db1", "db1", "db2", "db3", "db5"},
 			"tbl":                    []string{"t1", "t2", "t1", "t2", "t1"},
@@ -286,6 +307,8 @@ func TestTableStats(t *testing.T) {
 	}
 }
 
+//Because innodb stats on metadata is being collected,
+//metrics collector should not collect these metrics
 func TestNoSizes(t *testing.T) {
 	mu.Lock()
 
