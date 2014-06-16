@@ -10,6 +10,11 @@
 //
 // Since these tests make use of a temporary mysql instance. Connections
 // to permanent databases requiring passwords should be tested manually.
+//
+// Integration/Acceptance testing is harder and is avoided because
+// creating and populating a fake database with the necessary information
+// may be more trouble than is worth. Manual testing may be required for
+// full acceptance tests.
 
 package mysqltools
 
@@ -84,7 +89,7 @@ func TestMakeDsn1(t *testing.T) {
 		"password": "secret...shhh!",
 		"dbname":   "mysqldb",
 	}
-	expected := "brian:secret...shhh!@/mysqldb"
+	expected := "brian:secret...shhh!@/mysqldb?timeout=30s"
 	result := makeDsn(dsn)
 	if result != expected {
 		t.Error("Incorrect result, expected: " + expected + " but got: " + result)
@@ -95,7 +100,7 @@ func TestMakeDsn2(t *testing.T) {
 	dsn := map[string]string{
 		"dbname": "mysqldb",
 	}
-	expected := "/mysqldb"
+	expected := "/mysqldb?timeout=30s"
 	result := makeDsn(dsn)
 	if result != expected {
 		t.Error("Incorrect result, expected: " + expected + " but got: " + result)
@@ -109,7 +114,7 @@ func TestMakeDsn3(t *testing.T) {
 		"unix_socket": "unix_socket",
 		"dbname":      "mysqldb",
 	}
-	expected := "brian:secret...shhh!@unix_socket/mysqldb"
+	expected := "brian:secret...shhh!@unix_socket/mysqldb?timeout=30s"
 	result := makeDsn(dsn)
 	if result != expected {
 		t.Error("Incorrect result, expected: " + expected + " but got: " + result)

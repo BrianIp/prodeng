@@ -11,6 +11,11 @@
 // This ensures that other functions still work on malformed or missing
 // input, such as what would happen with an incorrect query.
 // Testing the correctness of mysql queries should be done manually.
+//
+// Integration/Acceptance testing is harder and is avoided because
+// creating and populating a fake database with the necessary information
+// may be more trouble than is worth. Manual testing may be required for
+// full acceptance tests.
 
 package mysqlstat
 
