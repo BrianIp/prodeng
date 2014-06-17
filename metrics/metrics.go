@@ -124,19 +124,29 @@ func (m *MetricContext) HttpJsonHandler(w http.ResponseWriter, r *http.Request) 
 		if appendcomma {
 			w.Write([]byte(",\n"))
 		}
-		w.Write([]byte(fmt.Sprintf(`{"type": "gauge", "name": "%s", "value": %f}`,
-			name, g.Get())))
-		appendcomma = true
+		val := g.Get()
+		if val >= 0 || val < 0 {
+			w.Write([]byte(fmt.Sprintf(`{"type": "gauge", "name": "%s", "value": %f}`,
+				name, val)))
+			appendcomma = true
+		} else {
+			appendcomma = false
+		}
 	}
 
 	for name, c := range m.Counters {
 		if appendcomma {
 			w.Write([]byte(",\n"))
 		}
-		w.Write([]byte(fmt.Sprintf(
-			`{"type": "counter", "name": "%s", "value": %d, "rate": %f}`,
-			name, c.Get(), c.ComputeRate())))
-		appendcomma = true
+		val := c.Get()
+		if val >= 0 {
+			w.Write([]byte(fmt.Sprintf(
+				`{"type": "counter", "name": "%s", "value": %d, "rate": %f}`,
+				name, val, c.ComputeRate())))
+			appendcomma = true
+		} else {
+			appendcomma = false
+		}
 	}
 
 	for name, s := range m.StatsTimers {

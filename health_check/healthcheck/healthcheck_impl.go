@@ -7,17 +7,19 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
-	"math"
 	"net"
 	"net/http"
-	"os/exec"
+	//	"os/exec"
+	"os"
+	"regexp"
 	"strconv"
+	"strings"
 
 	"code.google.com/p/goconf/conf" // used for parsing config files
 )
 
 //TODO: send to Nagios
-//TODO: compile nag warnings
+//TODO: compile nag warning messages
 
 const (
 	NSCA_BINARY_PATH      = "/usr/sbin/send_nsca"
@@ -25,14 +27,9 @@ const (
 	DEFAULT_NAGIOS_SERVER = "system-nagios-internal"
 	DEFAULT_CRIT_PCT      = 95
 	DEFAULT_WARN_PCT      = 85
-	CRIT                  = "CRIT"
-	WARN                  = "WARN"
-	OK                    = "OK"
-)
-
-var (
-	NAG_CODE              = map[string]int{OK: 0, WARN: 1, CRIT: 2}
-	testconfigurationfile = "/Users/brianip/Development/go/src/github.com/square/prodeng/health_check/test.config"
+	OK                    = iota
+	WARN                  = iota
+	CRIT                  = iota
 )
 
 type healthChecker struct {
@@ -44,6 +41,17 @@ type healthChecker struct {
 	c         *conf.ConfigFile
 }
 
+type metricThresholds struct {
+	metricname string
+	metrictype string
+	critThresh float64
+	warnThresh float64
+	critMsg    string
+	warnMsg    string
+	okMsg      string
+	check      string
+}
+
 type metric struct {
 	Type  string
 	Name  string
@@ -51,9 +59,8 @@ type metric struct {
 	Rate  float64
 }
 
-func New(hostport string) (HealthChecker, error) {
-	//TODO: connection to nagios server
-	c, err := conf.ReadConfigFile(testconfigurationfile)
+func New(hostport, configFile string) (HealthChecker, error) {
+	c, err := conf.ReadConfigFile(configFile)
 	if err != nil {
 		return nil, err
 	}
@@ -71,14 +78,22 @@ func New(hostport string) (HealthChecker, error) {
 }
 
 func (hc *healthChecker) SendNagiosPassive() error {
-	out, err := exec.Command("TODO: command").Output()
-	if err != nil {
-		return err
-	}
-	fmt.Println(out)
+	hostname, _ := os.Hostname()
+	service := "test_service"        //For Testing
+	state_code := strconv.Itoa(CRIT) //For Testing
+	message := "hello"               //Obviously for testing
+	info := strings.Join([]string{hostname, service, state_code, message}, "\t")
+	cmd := fmt.Sprintf("printf %s\\n", info)
+	fmt.Println(cmd)
+	/*	out, err := exec.Command("TODO: command").Output()
+		if err != nil {
+			return err
+		}
+		fmt.Println(out)*/
 	return errors.New("Not yet Implemented")
 }
 
+//gets metrics and unmarshals from JSON
 func (hc *healthChecker) getMetrics() error {
 	resp, err := http.Get("http://" + hc.hostport + "/metrics.json")
 	if err != nil {
@@ -104,6 +119,7 @@ func (hc *healthChecker) getMetrics() error {
 	return nil
 }
 
+//Checks metrics and TODO: send to Nagios
 func (hc *healthChecker) NagiosCheck() error {
 	err := hc.getMetrics()
 	if err != nil {
@@ -114,48 +130,80 @@ func (hc *healthChecker) NagiosCheck() error {
 
 	tests := hc.c.GetSections()
 	for _, test := range tests {
-		metricName, crit, warn := getVals(hc.c, test)
-
-		val := hc.Metrics[metricName].Value
-
-		if val > crit {
-			hc.Warnings[metricName] = "CRIT"
-		} else if val > warn {
-			hc.Warnings[metricName] = "WARN"
-		} else {
-			hc.Warnings[metricName] = "OK"
+		if test == "default" {
+			continue
 		}
+		m := getVals(hc.c, test)
+		if m.metrictype != "" {
+			vals := hc.matchMetrics(m.metrictype)
+			for name, val := range vals {
+				if _, ok := hc.Warnings[name]; ok {
+					continue
+				}
+				m.metricname = name
+				hc.Warnings[m.metricname] = checkMetric(m, val)
+			}
+			continue
+		}
+		if _, ok := hc.Metrics[m.metricname]; !ok {
+			hc.Warnings[m.metricname] = "not collected"
+		}
+		val := hc.Metrics[m.metricname].Value
+		hc.Warnings[m.metricname] = checkMetric(m, val)
 	}
 	return nil
 }
 
-func getVals(c *conf.ConfigFile, test string) (string, float64, float64) {
-	metricName, err := c.GetString(test, "metric")
-	if err != nil {
-		fmt.Println(err)
-		return "", math.NaN(), math.NaN()
+func checkMetric(m metricThresholds, val float64) string {
+	type compFunc func(float64, float64) bool
+	fns := map[string]compFunc{
+		">":  func(x, y float64) bool { return x > y },
+		"<":  func(x, y float64) bool { return x < y },
+		">=": func(x, y float64) bool { return x >= y },
+		"<=": func(x, y float64) bool { return x <= y },
+		"==": func(x, y float64) bool { return x == y },
 	}
-	tmp1, err := c.GetString(test, "crit-threshold")
-	if err != nil {
-		fmt.Println(err)
-		return "", math.NaN(), math.NaN()
+	cmp := fns[m.check]
+	if cmp(val, m.critThresh) {
+		return "CRIT: " + fmt.Sprintf("%s=%f", m.metricname, val) + " : " + m.critMsg
+	} else if cmp(val, m.warnThresh) {
+		return "WARN: " + fmt.Sprintf("%s=%f", m.metricname, val) + " : " + m.warnMsg
 	}
-	crit, err := strconv.ParseFloat(tmp1, 64)
-	if err != nil {
-		fmt.Println(err)
-		return "", math.NaN(), math.NaN()
+	return "OK: " + fmt.Sprintf("%s=%f", m.metricname, val) + " : " + m.okMsg
+}
+
+//Goes through metric names and returns matches to regexp
+func (hc *healthChecker) matchMetrics(re string) map[string]float64 {
+	res := make(map[string]float64)
+	r := regexp.MustCompile(re)
+	for key, metric := range hc.Metrics {
+		if r.MatchString(key) {
+			res[key] = metric.Value
+		}
 	}
-	tmp2, err := c.GetString(test, "warn-threshold")
-	if err != nil {
-		fmt.Println(err)
-		return "", math.NaN(), math.NaN()
+	return res
+}
+
+func getVals(c *conf.ConfigFile, test string) metricThresholds {
+	metricName, _ := c.GetString(test, "metric-name")
+	crit, _ := c.GetFloat64(test, "crit-threshold")
+	warn, _ := c.GetFloat64(test, "warn-threshold")
+	wm, _ := c.GetString(test, "warn-message")
+	cm, _ := c.GetString(test, "crit-message")
+	om, _ := c.GetString(test, "ok-message")
+	re, _ := c.GetString(test, "metric-type")
+	check, _ := c.GetString(test, "check")
+	m := &metricThresholds{
+		metricname: strings.TrimSpace(metricName),
+		metrictype: strings.TrimSpace(re),
+		critThresh: crit,
+		warnThresh: warn,
+		warnMsg:    strings.TrimSpace(wm),
+		critMsg:    strings.TrimSpace(cm),
+		okMsg:      strings.TrimSpace(om),
+		check:      strings.TrimSpace(check),
 	}
-	warn, err := strconv.ParseFloat(tmp2, 64)
-	if err != nil {
-		fmt.Println(err)
-		return "", math.NaN(), math.NaN()
-	}
-	return metricName, crit, warn
+	return *m
 }
 
 func (hc *healthChecker) GetWarnings() map[string]string {

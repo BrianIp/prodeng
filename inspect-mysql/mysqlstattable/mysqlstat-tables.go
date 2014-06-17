@@ -93,7 +93,7 @@ func New(m *metrics.MetricContext, Step time.Duration, user, password, config st
 //initialize  per database metrics
 func newMysqlStatPerDB(m *metrics.MetricContext, dbname string) *MysqlStatPerDB {
 	o := new(MysqlStatPerDB)
-	misc.InitializeMetrics(o, m, "mysqldbstat."+dbname, true)
+	misc.InitializeMetrics(o, m, "mysqlstat."+dbname, true)
 	return o
 }
 
@@ -101,7 +101,7 @@ func newMysqlStatPerDB(m *metrics.MetricContext, dbname string) *MysqlStatPerDB 
 func newMysqlStatPerTable(m *metrics.MetricContext, dbname, tblname string) *MysqlStatPerTable {
 	o := new(MysqlStatPerTable)
 
-	misc.InitializeMetrics(o, m, "mysqltablestat."+dbname+"."+tblname, true)
+	misc.InitializeMetrics(o, m, "mysqlstat."+dbname+"."+tblname, true)
 	return o
 }
 
