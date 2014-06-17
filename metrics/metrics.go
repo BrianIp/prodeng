@@ -5,7 +5,9 @@ package metrics
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -119,13 +121,22 @@ func (m *MetricContext) HttpJsonHandler(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte("[\n"))
 
+	err := r.ParseForm()
+	f := true // if f is set to false, filter out NaN metric values
+	if err != nil {
+		return
+	}
+	if n, ok := r.Form["allowNaN"]; ok && strings.ToLower(n[0]) == "false" {
+		f = false
+	}
+
 	appendcomma := false
 	for name, g := range m.Gauges {
 		if appendcomma {
 			w.Write([]byte(",\n"))
 		}
 		val := g.Get()
-		if val >= 0 || val < 0 {
+		if f || !math.IsNaN(val) {
 			w.Write([]byte(fmt.Sprintf(`{"type": "gauge", "name": "%s", "value": %f}`,
 				name, val)))
 			appendcomma = true
@@ -138,11 +149,11 @@ func (m *MetricContext) HttpJsonHandler(w http.ResponseWriter, r *http.Request) 
 		if appendcomma {
 			w.Write([]byte(",\n"))
 		}
-		val := c.Get()
-		if val >= 0 {
+		rate := c.ComputeRate()
+		if f || !math.IsNaN(rate) {
 			w.Write([]byte(fmt.Sprintf(
 				`{"type": "counter", "name": "%s", "value": %d, "rate": %f}`,
-				name, val, c.ComputeRate())))
+				name, c.Get(), rate)))
 			appendcomma = true
 		} else {
 			appendcomma = false
