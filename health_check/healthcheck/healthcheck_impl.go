@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"math"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -35,8 +34,6 @@ const (
 
 type healthChecker struct {
 	hostport  string
-	collector *http.Client
-	conn      net.Conn
 	Metrics   map[string]metric
 	AllMsgs   map[int]map[string]string //map of warning level mapping to CritMsgs, WarnMsgs, or OkMsgs
 	CritMsgs  map[string]string
@@ -57,7 +54,7 @@ type metricThresholds struct {
 	warnMsg       string
 	okMsg         string
 	check         string
-	levelNotFound int
+	levelNotFound int // level of warning if metric is not found, default is WARN
 	msgNotFound   string
 }
 
@@ -77,6 +74,8 @@ var (
 	nagLevels = map[string]int{"OK": 0, "WARN": 1, "CRIT": 2, "UNKNOWN": 3}
 )
 
+//Creates new healthChecker
+//hostport is address to listen on for metrics json
 func New(hostport, configFile, nagServer string, routers map[string]string) (HealthChecker, error) {
 	c, err := conf.ReadConfigFile(configFile)
 	if err != nil {
@@ -84,9 +83,7 @@ func New(hostport, configFile, nagServer string, routers map[string]string) (Hea
 	}
 
 	hc := &healthChecker{
-		hostport:  hostport,
-		collector: nil,
-		conn:      nil,
+		hostport:  hostport, //hostport to listen on for metrics json
 		Metrics:   make(map[string]metric),
 		CritMsgs:  make(map[string]string),
 		WarnMsgs:  make(map[string]string),
@@ -170,7 +167,7 @@ func (hc *healthChecker) NagiosCheck() error {
 					continue
 				}
 				m.metricname = name
-				lvl, value, message := hc.checkMetric(m, val)
+				lvl, value, message := checkMetric(m, val)
 				hc.AllMsgs[lvl][name] = value + " : " + message
 			}
 			continue
@@ -185,7 +182,7 @@ func (hc *healthChecker) NagiosCheck() error {
 		} else {
 			val = hc.Metrics[m.metricname].Value
 		}
-		lvl, value, message := hc.checkMetric(m, val)
+		lvl, value, message := checkMetric(m, val)
 		hc.AllMsgs[lvl][m.metricname] = value + " : " + message + ";"
 	}
 	return nil
@@ -205,14 +202,13 @@ func (hc *healthChecker) formatWarnings(service string) (string, int) {
 		if res != "" {
 			return res, i
 		}
-
 	}
 	return res, 0
 }
 
 //checks the metric's measured value against thresholds and returns the
 //corresponsing warning level, value (in string form), and warning message
-func (hc *healthChecker) checkMetric(m metricThresholds, val float64) (int, string, string) {
+func checkMetric(m metricThresholds, val float64) (int, string, string) {
 	//If the metric val = NaN or was not found, assign the warning messages specified
 	if math.IsNaN(val) {
 		return m.levelNotFound, fmt.Sprintf("%s=%f", m.metricname, val), m.msgNotFound
@@ -225,7 +221,7 @@ func (hc *healthChecker) checkMetric(m metricThresholds, val float64) (int, stri
 		"<=": func(x, y float64) bool { return x <= y },
 		"==": func(x, y float64) bool { return x == y },
 	}
-	cmp := fns[m.check]
+	cmp := fns[strings.TrimSpace(m.check)]
 	valstring := fmt.Sprintf("%s=%f", m.metricname, val)
 	if cmp(val, m.critThresh) {
 		return CRIT, valstring, m.critMsg
@@ -258,8 +254,14 @@ func getVals(c *conf.ConfigFile, test string) metricThresholds {
 	om, _ := c.GetString(test, "ok-message")
 	re, _ := c.GetString(test, "metric-type")
 	check, _ := c.GetString(test, "check")
-	levelNotFound, _ := c.GetString(test, "level-if-not-found")
-	msgNotFound, _ := c.GetString(test, "message-if-not-found")
+	levelNotFound, err := c.GetString(test, "level-if-not-found")
+	if err != nil {
+		levelNotFound = "WARN"
+	}
+	msgNotFound, err := c.GetString(test, "message-if-not-found")
+	if err != nil {
+		msgNotFound = "metric not collected"
+	}
 	m := &metricThresholds{
 		metricname:    strings.TrimSpace(metricName),
 		metrictype:    strings.TrimSpace(re),
