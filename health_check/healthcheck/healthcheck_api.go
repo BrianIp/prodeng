@@ -6,4 +6,5 @@ type HealthChecker interface {
 	SendNagiosPassive() error
 	NagiosCheck() error
 	GetWarnings() map[string]string
+	GetAllMsgs() map[int]map[string]string
 }

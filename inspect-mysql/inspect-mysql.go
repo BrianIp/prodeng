@@ -35,7 +35,7 @@ func main() {
 
 	if servermode {
 		go func() {
-			http.HandleFunc("/metrics.json", m.HttpJsonHandler)
+			http.HandleFunc("/api/v1/metrics.json", m.HttpJsonHandler)
 			log.Fatal(http.ListenAndServe(address, nil))
 		}()
 	}
