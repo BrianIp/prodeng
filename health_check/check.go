@@ -5,7 +5,9 @@ package main
 import (
 	"flag"
 	"fmt"
+	"os"
 	"strconv"
+	"time"
 
 	"github.com/square/prodeng/health_check/healthcheck"
 )
@@ -21,9 +23,11 @@ var (
 // TODO: put on loop/integrate with inspect
 func main() {
 	var hostport, configFile, nagServer string
+	var stepSec int
 
-	flag.StringVar(&hostport, "p", "localhost:12345", "hostport to grab metrics")
+	flag.StringVar(&hostport, "hostport", "localhost:12345", "hostport to grab metrics")
 	flag.StringVar(&configFile, "conf", "", "config file to read metric thresholds")
+	flag.IntVar(&stepSec, "step", 2, "time step in between sending messages to nagios")
 	flag.StringVar(&nagServer, "-nagios-server", "", "Default is '' but you probably want 'system-nagios-internal'")
 	flag.Parse()
 	if configFile == "" {
@@ -40,17 +44,20 @@ func main() {
 	hc, err := healthcheck.New(hostport, configFile, nagServer, nagRouter)
 	if err != nil {
 		fmt.Println(err)
-		return
+		os.Exit(1)
 	}
-
-	err = hc.NagiosCheck() // gets and analyzes metrics
-	if err != nil {
-		fmt.Println(err)
+	step := time.Millisecond * time.Duration(stepSec) * 1000
+	ticker := time.NewTicker(step)
+	for _ = range ticker.C {
+		err = hc.NagiosCheck() // gets and analyzes metrics
+		if err != nil {
+			fmt.Println(err)
+		}
+		warnings := hc.GetAllMsgs() // only returns collection of warnings, does not generate warnings
+		for lvl, msg := range warnings {
+			fmt.Println("Warnings for warning level " + strconv.Itoa(lvl) + " : ")
+			fmt.Println(msg)
+		}
+		hc.SendNagiosPassive()
 	}
-	warnings := hc.GetAllMsgs() // only returns collection of warnings, does not generate warnings
-	for lvl, msg := range warnings {
-		fmt.Println(strconv.Itoa(lvl) + " : ")
-		fmt.Println(msg)
-	}
-	hc.SendNagiosPassive()
 }

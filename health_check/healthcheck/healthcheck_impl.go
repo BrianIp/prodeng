@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -24,6 +25,7 @@ const (
 	OK = iota
 	WARN
 	CRIT
+	UNKNOWN
 	NSCA_BINARY_PATH      = "/usr/sbin/send_nsca"
 	NSCA_CONFIG_PATH      = "/etc/nagios/send_nsca.cfg"
 	DEFAULT_NAGIOS_SERVER = "system-nagios-internal"
@@ -47,14 +49,16 @@ type healthChecker struct {
 }
 
 type metricThresholds struct {
-	metricname string
-	metrictype string
-	critThresh float64
-	warnThresh float64
-	critMsg    string
-	warnMsg    string
-	okMsg      string
-	check      string
+	metricname    string
+	metrictype    string
+	critThresh    float64
+	warnThresh    float64
+	critMsg       string
+	warnMsg       string
+	okMsg         string
+	check         string
+	levelNotFound int
+	msgNotFound   string
 }
 
 type warning struct {
@@ -68,6 +72,10 @@ type metric struct {
 	Value float64
 	Rate  float64
 }
+
+var (
+	nagLevels = map[string]int{"OK": 0, "WARN": 1, "CRIT": 2, "UNKNOWN": 3}
+)
 
 func New(hostport, configFile, nagServer string, routers map[string]string) (HealthChecker, error) {
 	c, err := conf.ReadConfigFile(configFile)
@@ -101,11 +109,11 @@ func (hc *healthChecker) SendNagiosPassive() error {
 		printCmd := exec.Command("printf", fmt.Sprintf("\"%s\\n\"", info)) //TODO: are these extra \" necessary?
 		out, err := printCmd.Output()
 		fmt.Printf("output: %s", out)
-		//	  sendCmd := exec.Command(NSCA_BINARY_PATH, hc.nagServer, NSCA_CONFIG_PATH)
-		//	  sendCmd.Stdin, _ = printCmd.StdoutPipe()
-		//	  sendCmd.Start()
-		//	  printCmd.Run()
-		//	  err := sendCmd.Wait()
+		//sendCmd := exec.Command(NSCA_BINARY_PATH, hc.nagServer, "-c "+NSCA_CONFIG_PATH)
+		//sendCmd.Stdin, _ = printCmd.StdoutPipe()
+		//sendCmd.Start()
+		//printCmd.Run()
+		//err := sendCmd.Wait()
 		if err != nil {
 			return err
 		}
@@ -153,6 +161,8 @@ func (hc *healthChecker) NagiosCheck() error {
 			continue
 		}
 		m := getVals(hc.c, test)
+		//If the user has specified a general type of metric to be checked against
+		// a common threshold
 		if m.metrictype != "" {
 			vals := hc.matchMetrics(m.metrictype)
 			for name, val := range vals {
@@ -165,12 +175,18 @@ func (hc *healthChecker) NagiosCheck() error {
 			}
 			continue
 		}
+		//Else just compare the one metric against its thresholds
+		var val float64
+		//Assign val NaN if not found. Usually the metrics collector will collect the metric and
+		// assign NaN to it itself, but the json api currently used does not support nan so these
+		// metrics were filtered out.
 		if _, ok := hc.Metrics[m.metricname]; !ok {
-			hc.Warnings[m.metricname] = "not collected"
+			val = math.NaN()
+		} else {
+			val = hc.Metrics[m.metricname].Value
 		}
-		val := hc.Metrics[m.metricname].Value
 		lvl, value, message := hc.checkMetric(m, val)
-		hc.AllMsgs[lvl][m.metricname] = value + " : " + message
+		hc.AllMsgs[lvl][m.metricname] = value + " : " + message + ";"
 	}
 	return nil
 }
@@ -183,7 +199,7 @@ func (hc *healthChecker) formatWarnings(service string) (string, int) {
 	for i := 2; i >= 0; i-- { //start with critical messages first
 		for key, msg := range hc.AllMsgs[i] {
 			if re.MatchString(key) {
-				res += msg
+				res += " " + msg
 			}
 		}
 		if res != "" {
@@ -197,6 +213,10 @@ func (hc *healthChecker) formatWarnings(service string) (string, int) {
 //checks the metric's measured value against thresholds and returns the
 //corresponsing warning level, value (in string form), and warning message
 func (hc *healthChecker) checkMetric(m metricThresholds, val float64) (int, string, string) {
+	//If the metric val = NaN or was not found, assign the warning messages specified
+	if math.IsNaN(val) {
+		return m.levelNotFound, fmt.Sprintf("%s=%f", m.metricname, val), m.msgNotFound
+	}
 	type compFunc func(float64, float64) bool
 	fns := map[string]compFunc{
 		">":  func(x, y float64) bool { return x > y },
@@ -238,15 +258,19 @@ func getVals(c *conf.ConfigFile, test string) metricThresholds {
 	om, _ := c.GetString(test, "ok-message")
 	re, _ := c.GetString(test, "metric-type")
 	check, _ := c.GetString(test, "check")
+	levelNotFound, _ := c.GetString(test, "level-if-not-found")
+	msgNotFound, _ := c.GetString(test, "message-if-not-found")
 	m := &metricThresholds{
-		metricname: strings.TrimSpace(metricName),
-		metrictype: strings.TrimSpace(re),
-		critThresh: crit,
-		warnThresh: warn,
-		warnMsg:    strings.TrimSpace(wm),
-		critMsg:    strings.TrimSpace(cm),
-		okMsg:      strings.TrimSpace(om),
-		check:      strings.TrimSpace(check),
+		metricname:    strings.TrimSpace(metricName),
+		metrictype:    strings.TrimSpace(re),
+		critThresh:    crit,
+		warnThresh:    warn,
+		warnMsg:       strings.TrimSpace(wm),
+		critMsg:       strings.TrimSpace(cm),
+		okMsg:         strings.TrimSpace(om),
+		check:         strings.TrimSpace(check),
+		levelNotFound: nagLevels[strings.ToUpper(strings.TrimSpace(levelNotFound))],
+		msgNotFound:   strings.TrimSpace(msgNotFound),
 	}
 	return *m
 }
