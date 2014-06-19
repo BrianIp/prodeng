@@ -8,10 +8,10 @@ import (
 	"io/ioutil"
 	"math"
 	"net/http"
-	"os"
-	"os/exec"
+	//"os"
+	//"os/exec"
 	"regexp"
-	"strconv"
+	//"strconv"
 	"strings"
 
 	"code.google.com/p/goconf/conf" // used for parsing config files
@@ -33,16 +33,17 @@ const (
 )
 
 type healthChecker struct {
-	hostport  string
-	Metrics   map[string]metric
-	AllMsgs   map[int]map[string]string //map of warning level mapping to CritMsgs, WarnMsgs, or OkMsgs
-	CritMsgs  map[string]string
-	WarnMsgs  map[string]string
-	Warnings  map[string]string
-	OkMsgs    map[string]string
-	routers   map[string]string //maps service name to a regexp string that matches metrics collected for that service
-	c         *conf.ConfigFile
-	nagServer string
+	hostport    string
+	serviceType string //mysql, postgres, etc.
+	Metrics     map[string]metric
+	AllMsgs     map[int]map[string]string //map of warning level mapping to CritMsgs, WarnMsgs, or OkMsgs
+	CritMsgs    map[string]string
+	WarnMsgs    map[string]string
+	Warnings    map[string]string
+	OkMsgs      map[string]string
+	routers     map[string]string //maps service name to a regexp string that matches metrics collected for that service
+	c           *conf.ConfigFile
+	nagServer   string
 }
 
 type metricThresholds struct {
@@ -76,45 +77,45 @@ var (
 
 //Creates new healthChecker
 //hostport is address to listen on for metrics json
-func New(hostport, configFile, nagServer string, routers map[string]string) (HealthChecker, error) {
+func New(hostport, configFile, nagServer, serviceType string) /*, routers map[string]string)*/ (HealthChecker, error) {
 	c, err := conf.ReadConfigFile(configFile)
 	if err != nil {
 		return nil, err
 	}
 
 	hc := &healthChecker{
-		hostport:  hostport, //hostport to listen on for metrics json
-		Metrics:   make(map[string]metric),
-		CritMsgs:  make(map[string]string),
-		WarnMsgs:  make(map[string]string),
-		OkMsgs:    make(map[string]string),
-		Warnings:  make(map[string]string),
-		nagServer: nagServer,
-		routers:   routers,
-		c:         c,
+		hostport:    hostport, //hostport to listen on for metrics json
+		serviceType: serviceType,
+		Metrics:     make(map[string]metric),
+		CritMsgs:    make(map[string]string),
+		WarnMsgs:    make(map[string]string),
+		OkMsgs:      make(map[string]string),
+		Warnings:    make(map[string]string),
+		nagServer:   nagServer,
+		//routers:   routers,
+		c: c,
 	}
 	hc.AllMsgs = map[int]map[string]string{CRIT: hc.CritMsgs, WARN: hc.WarnMsgs, OK: hc.OkMsgs}
+	hc.getServices()
 	return hc, nil
 }
 
 //Sends nagios server metrics warnings
 func (hc *healthChecker) SendNagiosPassive() error {
-	for service, regex := range hc.routers {
-		message, state_code := hc.formatWarnings(regex)
-		hostname, _ := os.Hostname()
-		info := strings.Join([]string{hostname, service, strconv.Itoa(state_code), message}, "\t")
-		printCmd := exec.Command("printf", fmt.Sprintf("\"%s\\n\"", info)) //TODO: are these extra \" necessary?
-		out, err := printCmd.Output()
-		fmt.Printf("output: %s", out)
-		//sendCmd := exec.Command(NSCA_BINARY_PATH, hc.nagServer, "-c "+NSCA_CONFIG_PATH)
-		//sendCmd.Stdin, _ = printCmd.StdoutPipe()
-		//sendCmd.Start()
-		//printCmd.Run()
-		//err := sendCmd.Wait()
-		if err != nil {
-			return err
-		}
-	}
+	//for service, regex := range hc.routers {
+	//message, state_code := hc.formatWarnings(regex)
+	//hostname, _ := os.Hostname()
+	//info := strings.Join([]string{hostname, service, strconv.Itoa(state_code), message}, "\t")
+	//printCmd := exec.Command("printf", fmt.Sprintf("\"%s\\n\"", info))
+	//sendCmd := exec.Command(NSCA_BINARY_PATH, hc.nagServer, "-c "+NSCA_CONFIG_PATH)
+	//sendCmd.Stdin, _ = printCmd.StdoutPipe()
+	//sendCmd.Start()
+	//printCmd.Run()
+	//err := sendCmd.Wait()
+	//if err != nil {
+	//	return err
+	//}
+	//}
 	return nil
 }
 
@@ -177,19 +178,20 @@ func (hc *healthChecker) NagiosCheck() error {
 		//Assign val NaN if not found. Usually the metrics collector will collect the metric and
 		// assign NaN to it itself, but the json api currently used does not support nan so these
 		// metrics were filtered out.
-		if _, ok := hc.Metrics[m.metricname]; !ok {
-			val = math.NaN()
-		} else {
-			val = hc.Metrics[m.metricname].Value
+		if m.metricname != "" {
+			if _, ok := hc.Metrics[m.metricname]; !ok {
+				val = math.NaN()
+			} else {
+				val = hc.Metrics[m.metricname].Value
+			}
+			lvl, value, message := checkMetric(m, val)
+			hc.AllMsgs[lvl][m.metricname] = value + " : " + message + ";"
 		}
-		lvl, value, message := checkMetric(m, val)
-		hc.AllMsgs[lvl][m.metricname] = value + " : " + message + ";"
 	}
 	return nil
 }
 
 //formats warning messages to be sent to nagios server
-// TODO: look into correctly fromatting these warnings
 func (hc *healthChecker) formatWarnings(service string) (string, int) {
 	res := ""
 	re := regexp.MustCompile(service)
@@ -242,6 +244,22 @@ func (hc *healthChecker) matchMetrics(re string) map[string]float64 {
 		}
 	}
 	return res
+}
+
+//gets the services and metrics for the nagios server
+func (hc *healthChecker) getServices() {
+	nag_routers := map[string]string{hc.serviceType + ".health": ".+"}
+	serviceNames, err := hc.c.GetOptions("services")
+	if err != nil {
+		hc.routers = nag_routers
+		return
+	}
+	for _, serviceName := range serviceNames {
+		serviceMetrics, _ := hc.c.GetString("services", serviceName)
+		nag_routers[serviceName] = serviceMetrics
+	}
+	hc.routers = nag_routers
+	return
 }
 
 //Reads the thresholds and messages from the config file

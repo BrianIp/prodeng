@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strconv"
 	"time"
 
 	"github.com/square/prodeng/health_check/healthcheck"
@@ -20,12 +19,13 @@ var (
 // launches new healthChecker
 // collects metric analysis once and prints results
 // Note to self: different health checker is needed for mysql vs postgres
-// TODO: put on loop/integrate with inspect
+// TODO: potentially integrate with inspect
 func main() {
-	var hostport, configFile, nagServer string
+	var hostport, configFile, nagServer, serviceType string
 	var stepSec int
 
 	flag.StringVar(&hostport, "hostport", "localhost:12345", "hostport to grab metrics")
+	flag.StringVar(&serviceType, "t", "", "service type, either: mysql, postgres, etc.")
 	flag.StringVar(&configFile, "conf", "", "config file to read metric thresholds")
 	flag.IntVar(&stepSec, "step", 2, "time step in between sending messages to nagios")
 	flag.StringVar(&nagServer, "-nagios-server", "", "Default is '' but you probably want 'system-nagios-internal'")
@@ -35,13 +35,15 @@ func main() {
 	}
 
 	fmt.Println("starting metrics checker on: ", hostport)
-	nagRouter := map[string]string{
-		"mysql.slave":    "^Slave.+$",
-		"mysql.com":      "^.*Com.+$",
-		"mysql.sessions": "^(conn_max_pct|sess.+|loadavg.+)$",
-		"mysql.long":     "^.*(ActiveLongRunQueries|Oldest_query_s|innodb_history_link_list).*$",
-	}
-	hc, err := healthcheck.New(hostport, configFile, nagServer, nagRouter)
+	//TODO: make this a part of the config file
+	/*	nagRouter := map[string]string{
+		    "mysql.health":   ".+",
+				"mysql.slave":    "^.*Slave.+$",
+				"mysql.com":      "^.*Com.+$",
+				"mysql.sessions": "^(conn_max_pct|sess.+|loadavg.+)$",
+				"mysql.long":     "^.*(ActiveLongRunQueries|OldestQueryS|InnodbHistoryLinkList).*$",
+			}*/
+	hc, err := healthcheck.New(hostport, configFile, nagServer, serviceType) //, nagRouter)
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
@@ -54,9 +56,12 @@ func main() {
 			fmt.Println(err)
 		}
 		warnings := hc.GetAllMsgs() // only returns collection of warnings, does not generate warnings
+		nag_levels := map[int]string{0: "OK", 1: "WARN", 2: "CRIT"}
 		for lvl, msg := range warnings {
-			fmt.Println("Warnings for warning level " + strconv.Itoa(lvl) + " : ")
-			fmt.Println(msg)
+			fmt.Println("Warnings for warning level " + nag_levels[lvl] + " : ")
+			for _, m := range msg {
+				fmt.Println(m)
+			}
 		}
 		hc.SendNagiosPassive()
 	}

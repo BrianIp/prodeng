@@ -30,15 +30,16 @@ func initTestChecker(t testing.TB) healthChecker {
 		"mysql.long":     "^.*(ActiveLongRunQueries|Oldest_query_s|innodb_history_link_list).*$",
 	}
 	hc := healthChecker{
-		hostport:  "localhost:12345",
-		Metrics:   make(map[string]metric),
-		CritMsgs:  make(map[string]string),
-		WarnMsgs:  make(map[string]string),
-		OkMsgs:    make(map[string]string),
-		Warnings:  make(map[string]string),
-		nagServer: "test-server",
-		routers:   nagRouter,
-		c:         c,
+		hostport:    "localhost:12345",
+		serviceType: "mysql",
+		Metrics:     make(map[string]metric),
+		CritMsgs:    make(map[string]string),
+		WarnMsgs:    make(map[string]string),
+		OkMsgs:      make(map[string]string),
+		Warnings:    make(map[string]string),
+		nagServer:   "test-server",
+		routers:     nagRouter,
+		c:           c,
 	}
 
 	return hc
