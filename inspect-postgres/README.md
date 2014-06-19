@@ -8,14 +8,9 @@ inspect command line is a utility that gives a brief overview on the databases: 
 
 inspect gathers the following metrics:
 - Version number
-- Slave Stats
-- Global Stats
 - Binlog Stats
-- Stacked Query info
 - Session Info
-- Innodb stats
 - Long Run Query info
-- Query Response Times
 
 ##Installation
 
