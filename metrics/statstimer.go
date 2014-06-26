@@ -126,6 +126,9 @@ func (s *StatsTimer) Percentile(percentile float64) (float64, error) {
 	return ret, nil
 }
 
+// GetJson returns the metric's statistics formatted as a Json package.
+// If allowNaN is set to false and the metric has NaN values, GetJson
+// returns a nil []byte
 func (s *StatsTimer) GetJson(name string, allowNaN bool) []byte {
 	type percentileData struct {
 		percentile string

@@ -97,6 +97,9 @@ func (c *Counter) ComputeRate() float64 {
 	return c.rate
 }
 
+// GetJson returns the metric's statistics formatted as a Json package.
+// If allowNaN is set to false and the metric has NaN values, GetJson
+// returns a nil []byte
 func (c *Counter) GetJson(name string, allowNaN bool) []byte {
 	rate := c.ComputeRate()
 	if allowNaN || !math.IsNaN(rate) {

@@ -42,6 +42,9 @@ func (g *Gauge) Get() float64 {
 	return g.v
 }
 
+// GetJson returns the metric's statistics formatted as a Json package.
+// If allowNaN is set to false and the metric has NaN values, GetJson
+// returns a nil []byte
 func (g *Gauge) GetJson(name string, allowNaN bool) []byte {
 	val := g.Get()
 	if allowNaN || !math.IsNaN(val) {

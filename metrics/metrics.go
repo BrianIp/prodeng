@@ -34,7 +34,7 @@ type MetricContext struct {
 	StatsTimers   map[string]*StatsTimer
 }
 
-type metric interface {
+type Metric interface {
 	GetJson(name string, allowNaN bool) []byte
 }
 
@@ -46,7 +46,8 @@ type metric interface {
 
 const jiffy = 100
 
-const NS_IN_SEC = float64(time.Second) //nanoseconds in a second represented in float64
+//nanoseconds in a second represented in float64
+const NS_IN_SEC = float64(time.Second)
 
 // default percentiles to compute when serializing statstimer type
 // to stdout/json
@@ -144,10 +145,15 @@ func ParseURL(url string) []string {
 }
 
 //filter metrics
-// return a map of metric name -> metric, return metrics that are of the given type and match the input regexp metricnames
-func (m *MetricContext) FilterMetrics(metricnames ...string) map[interface{}]metric {
+// return a map of metric name -> metric,
+// return metrics that are of the given type
+//and match the input regexp metricnames
+func (m *MetricContext) FilterMetrics(metricnames ...string) map[interface{}]Metric {
+	if len(metricnames) == 0 {
+		return nil
+	}
 	types := metricnames[0]
-	metricsToCollect := map[interface{}]metric{}
+	metricsToCollect := map[interface{}]Metric{}
 	if strings.Contains(types, "Gauges") {
 		for k, v := range m.Gauges {
 			metricsToCollect[k] = v
@@ -177,8 +183,9 @@ func (m *MetricContext) FilterMetrics(metricnames ...string) map[interface{}]met
 	return metricsToCollect
 }
 
-//write metrics given
-func WriteMetrics(m map[interface{}]metric, allowNaN bool, w io.Writer) error {
+// WriteMetrics writes the metrics included in m to w.
+// If allowNaN is set to false, metrics with NaN will not be written
+func WriteMetrics(m map[interface{}]Metric, allowNaN bool, w io.Writer) error {
 	prependcomma := false
 	for name, metric := range m {
 		if prependcomma {
